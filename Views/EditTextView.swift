@@ -1189,8 +1189,14 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             // File movement
             case "g":
                 if isShiftPressed {
-                    // G - go to end of file
-                    moveToEndOfDocument(self)
+                    // G - go to end of file or operate to end
+                    if pendingOperator != .none {
+                        // dG, yG, cG - operate from current position to end of file
+                        handlePendingOperator(withMotion: "G")
+                        pendingOperator = .none
+                    } else {
+                        moveToEndOfDocument(self)
+                    }
                 } else {
                     // g - needs another g to go to beginning
                     if pendingG {
@@ -2022,6 +2028,11 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             let lineRange = nsString.lineRange(for: NSRange(location: min(cursor, max(length - 1, 0)), length: 0))
             let start = firstNonSpace(in: nsString, range: lineRange)
             return start < cursor ? NSRange(location: start, length: cursor - start) : nil
+        case "G":
+            // G - from current line to end of file (including all lines)
+            let currentLineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+            let startPos = currentLineRange.location
+            return length > startPos ? NSRange(location: startPos, length: length - startPos) : nil
         default:
             return nil
         }
@@ -2198,7 +2209,15 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
         let nsString = storage.string as NSString
         let cursor = selectedRange().location
         let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
-        let insertPos = lineRange.upperBound
+
+        // Find the position at the end of the line (before the newline character)
+        var insertPos = lineRange.upperBound
+        if insertPos > lineRange.location {
+            let ch = nsString.character(at: insertPos - 1)
+            if ch == 0x0A || ch == 0x0D {
+                insertPos -= 1
+            }
+        }
 
         let newLine = "\n"
         let range = NSRange(location: insertPos, length: 0)

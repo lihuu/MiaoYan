@@ -87,6 +87,11 @@ class VimModeHandler {
         self.delegate = delegate
     }
 
+    /// Initialize caret style based on current mode (call this when opening a file)
+    func initializeCaretStyle() {
+        updateCaretStyle()
+    }
+
     // MARK: - Mode Switching
 
     func enterInsertMode() {

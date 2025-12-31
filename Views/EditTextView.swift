@@ -661,6 +661,11 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             storage.applyEditorLetterSpacing()
         }
         restoreCursorPosition(needScrollToCursor: options.needScrollToCursor)
+
+        // Initialize vim caret style when opening file
+        if UserDefaultsManagement.vimModeEnabled {
+            vimHandler.initializeCaretStyle()
+        }
     }
 
     public func clear() {

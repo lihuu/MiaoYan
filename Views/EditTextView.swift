@@ -77,6 +77,7 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
         case normal
         case visual
         case visualLine
+        case command
     }
 
     private enum PendingOperator {
@@ -91,6 +92,9 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
     private var pendingG: Bool = false
     private var pendingR: Character? = nil
     private var visualAnchor: Int = 0
+    private var commandBuffer: String = ""
+    private var statusBarView: NSView?
+    private var statusBarLabel: NSTextField?
     override var textContainerOrigin: NSPoint {
         var origin = super.textContainerOrigin
         if bottomPadding > 0 {
@@ -112,6 +116,20 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             hasCapturedDefaultVerticalInset = true
             bottomPadding = 0
             updateCaretStyle()
+            initializeStatusBar()
+        }
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        initializeStatusBar()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            print("[VimMode] viewDidMoveToWindow - window is available")
+            initializeStatusBar()
         }
     }
 
@@ -641,10 +659,18 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
         updateCaretStyle()
     }
 
+    private func enterCommandMode() {
+        print("[VimMode] enterCommandMode called")
+        editorMode = .command
+        commandBuffer = ""
+        updateCaretStyle()
+    }
+
     private func updateCaretStyle() {
         let blockWidth = blockCaretWidth()
         caretWidth = (editorMode == .normal || editorMode == .visual || editorMode == .visualLine) ? blockWidth : 1
         setNeedsDisplay(bounds)
+        updateStatusBar()
     }
 
     private func blockCaretWidth() -> CGFloat {
@@ -1124,6 +1150,45 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
         imagePreviewManager?.hideImagePreview()
 
         // Handle visual mode
+        // Handle command mode
+        if editorMode == .command,
+            let chars = event.charactersIgnoringModifiers
+        {
+            let keyCode = event.keyCode
+
+            // Backspace/Delete to remove last character
+            if keyCode == kVK_Delete || keyCode == kVK_ForwardDelete {
+                if !commandBuffer.isEmpty {
+                    commandBuffer.removeLast()
+                    updateStatusBar()
+                }
+                return
+            }
+
+            // Enter to execute command
+            if keyCode == kVK_Return {
+                executeCommand(commandBuffer)
+                commandBuffer = ""
+                enterNormalMode()
+                return
+            }
+
+            // Escape to cancel command
+            if keyCode == kVK_Escape {
+                commandBuffer = ""
+                enterNormalMode()
+                return
+            }
+
+            // Add character to command buffer (letters and numbers)
+            if let char = chars.first, char.isLetter || char.isNumber || char == " " {
+                commandBuffer.append(char)
+                updateStatusBar()
+                return
+            }
+        }
+
+        // Handle visual mode
         if editorMode == .visual,
             event.keyCode != kVK_Escape,
             let chars = event.charactersIgnoringModifiers
@@ -1396,6 +1461,12 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
                     // v - enter visual mode
                     enterVisualMode()
                 }
+                return
+
+            // Command mode
+            case ":":
+                print("[VimMode] ':' key pressed in normal mode")
+                enterCommandMode()
                 return
 
             default:
@@ -2575,6 +2646,121 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             didChangeText()
             enterNormalMode()
             setSelectedRange(NSRange(location: range.location, length: 0))
+        }
+    }
+    // MARK: - Command Mode Helpers
+
+    private func initializeStatusBar() {
+        // Lazily create the views once
+        if statusBarView == nil {
+            print("[VimMode] Creating new status bar view")
+            let statusBar = NSView()
+            statusBar.wantsLayer = true
+            statusBar.layer?.backgroundColor = NSColor.gray.withAlphaComponent(0.3).cgColor
+            statusBarView = statusBar
+
+            let label = NSTextField()
+            label.isBordered = false
+            label.isBezeled = false
+            label.drawsBackground = false
+            label.isEditable = false
+            label.isSelectable = false
+            label.textColor = EditTextView.fontColor
+            label.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            label.stringValue = "NORMAL"
+            statusBar.addSubview(label)
+            statusBarLabel = label
+        }
+
+        // Attach to layout once the window is ready
+        guard let statusBar = statusBarView else {
+            print("[VimMode] statusBarView is nil, returning")
+            return
+        }
+        
+        // Try to find a suitable parent view
+        guard let targetView = window?.contentView else {
+            print("[VimMode] window.contentView is nil, retrying later...")
+            // Only retry a limited number of times via viewDidMoveToWindow
+            return
+        }
+
+        print("[VimMode] Found window.contentView: \(targetView)")
+
+        if statusBar.superview == nil {
+            print("[VimMode] Adding status bar to window.contentView")
+            targetView.addSubview(statusBar)
+            constrainStatusBar(statusBar)
+            print("[VimMode] Status bar added and constrained")
+        } else {
+            print("[VimMode] Status bar already has superview: \(String(describing: statusBar.superview))")
+        }
+    }
+
+    private func constrainStatusBar(_ statusBar: NSView) {
+        guard let targetView = window?.contentView else { return }
+        statusBar.translatesAutoresizingMaskIntoConstraints = false
+
+        NSLayoutConstraint.activate([
+            statusBar.leadingAnchor.constraint(equalTo: targetView.leadingAnchor),
+            statusBar.trailingAnchor.constraint(equalTo: targetView.trailingAnchor),
+            statusBar.bottomAnchor.constraint(equalTo: targetView.bottomAnchor),
+            statusBar.heightAnchor.constraint(equalToConstant: 24),
+        ])
+
+        // Position label in status bar
+        if let label = statusBarLabel {
+            label.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor, constant: 8),
+                label.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
+            ])
+        }
+    }
+
+    private func updateStatusBar() {
+        var modeText = ""
+        switch editorMode {
+        case .insert:
+            modeText = "INSERT"
+        case .normal:
+            modeText = "NORMAL"
+        case .visual:
+            modeText = "VISUAL"
+        case .visualLine:
+            modeText = "VISUAL LINE"
+        case .command:
+            modeText = ":\(commandBuffer)"
+        }
+        print("[VimMode] updateStatusBar: \(modeText), label: \(String(describing: statusBarLabel)), superview: \(String(describing: statusBarView?.superview))")
+        statusBarLabel?.stringValue = modeText
+    }
+
+    private func executeCommand(_ command: String) {
+        print("[VimMode] executeCommand: \(command)")
+        let trimmedCmd = command.trimmingCharacters(in: .whitespaces).lowercased()
+
+        switch trimmedCmd {
+        case "w":
+            // Save file
+            if let note = EditTextView.note {
+                saveTextStorageContent(to: note)
+                note.save()
+                EditTextView.shouldForceRescan = true
+            }
+        case "wq", "x":
+            // Save and quit
+            if let note = EditTextView.note {
+                saveTextStorageContent(to: note)
+                note.save()
+                EditTextView.shouldForceRescan = true
+            }
+            window?.close()
+        case "q":
+            // Quit without saving
+            window?.close()
+        default:
+            NSSound.beep()
         }
     }
 }

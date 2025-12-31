@@ -285,6 +285,7 @@ final class EditorPrefsViewController: BasePrefsViewController {
 
     @objc private func vimModeChanged(_ sender: NSSwitch) {
         UserDefaultsManagement.vimModeEnabled = (sender.state == .on)
+        NotificationCenter.default.post(name: .vimModeChanged, object: sender.state == .on)
     }
 
     // MARK: - Localization Helpers for raw/display mapping

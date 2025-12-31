@@ -558,6 +558,9 @@ class VimModeHandler {
         statusBarLabel?.textColor = modeColor
     }
 
+    func hideStatusBar() {
+        statusBarView?.removeFromSuperview()
+    }
     // MARK: - Command Execution
 
     private func executeCommand(_ command: String) {

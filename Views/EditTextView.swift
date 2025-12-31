@@ -98,6 +98,25 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             hasCapturedDefaultVerticalInset = true
             bottomPadding = 0
             _ = vimHandler  // Initialize vim handler
+
+            // Listen for vim mode changes
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleVimModeChanged(_:)),
+                name: .vimModeChanged,
+                object: nil
+            )
+        }
+    }
+
+    @objc private func handleVimModeChanged(_ notification: Notification) {
+        let enabled = notification.object as? Bool ?? false
+        if enabled {
+            vimHandler.initializeStatusBar(in: window?.contentView)
+            vimHandler.enterNormalMode()
+        } else {
+            vimHandler.hideStatusBar()
+            vimHandler.enterInsertMode()
         }
     }
 
@@ -425,6 +444,40 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
 
             // Update cursor position
             let newPosition = range.location + text.count
+            setSelectedRange(NSRange(location: newPosition, length: 0))
+        }
+    }
+
+    private func insertCodeBlock() {
+        guard EditTextView.note != nil else { return }
+        window?.makeFirstResponder(self)
+
+        let range = selectedRange()
+        let selectedText = (string as NSString).substring(with: range)
+
+        // Create code block with selected text (if any) inside
+        let codeBlock: String
+        let cursorOffset: Int
+
+        if selectedText.isEmpty {
+            // No selection: insert empty code block and place cursor after ```\n
+            codeBlock = "```\n\n```"
+            cursorOffset = 4  // Position after "```\n"
+        } else {
+            // Has selection: wrap selected text in code block
+            codeBlock = "```\n\(selectedText)\n```"
+            cursorOffset = 4 + selectedText.count + 1  // Position after the wrapped content
+        }
+
+        if shouldChangeText(in: range, replacementString: codeBlock) {
+            let attributes = typingAttributes
+            let attributedText = NSAttributedString(string: codeBlock, attributes: attributes)
+
+            textStorage?.replaceCharacters(in: range, with: attributedText)
+            didChangeText()
+
+            // Place cursor inside the code block
+            let newPosition = range.location + cursorOffset
             setSelectedRange(NSRange(location: newPosition, length: 0))
         }
     }
@@ -1261,6 +1314,12 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
                     break
                 }
             }
+        }
+
+        // Cmd+Option+C: Insert code block
+        if commandPressed, optionPressed, !controlPressed, characters.lowercased() == "c" {
+            insertCodeBlock()
+            return true
         }
 
         if characters == "\u{1f}\u{a}" {  // Cmd+Enter etc fallback

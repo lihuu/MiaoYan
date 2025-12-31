@@ -75,6 +75,8 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
     private enum EditorMode {
         case insert
         case normal
+        case visual
+        case visualLine
     }
 
     private enum PendingOperator {
@@ -88,6 +90,7 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
     private var pendingOperator: PendingOperator = .none
     private var pendingG: Bool = false
     private var pendingR: Character? = nil
+    private var visualAnchor: Int = 0
     override var textContainerOrigin: NSPoint {
         var origin = super.textContainerOrigin
         if bottomPadding > 0 {
@@ -621,9 +624,26 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
         updateCaretStyle()
     }
 
+    private func enterVisualMode() {
+        editorMode = .visual
+        visualAnchor = selectedRange().location
+        updateCaretStyle()
+    }
+
+    private func enterVisualLineMode() {
+        guard let storage = textStorage else { return }
+        editorMode = .visualLine
+        let nsString = storage.string as NSString
+        let cursor = selectedRange().location
+        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+        visualAnchor = lineRange.location
+        setSelectedRange(lineRange)
+        updateCaretStyle()
+    }
+
     private func updateCaretStyle() {
         let blockWidth = blockCaretWidth()
-        caretWidth = editorMode == .normal ? blockWidth : 1
+        caretWidth = (editorMode == .normal || editorMode == .visual || editorMode == .visualLine) ? blockWidth : 1
         setNeedsDisplay(bounds)
     }
 
@@ -1103,6 +1123,62 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
     override func keyDown(with event: NSEvent) {
         imagePreviewManager?.hideImagePreview()
 
+        // Handle visual mode
+        if editorMode == .visual,
+            event.keyCode != kVK_Escape,
+            let chars = event.charactersIgnoringModifiers
+        {
+            let key = chars.lowercased()
+
+            switch key {
+            case "h":
+                moveVisualSelection(direction: .left)
+                return
+            case "j":
+                moveVisualSelection(direction: .down)
+                return
+            case "k":
+                moveVisualSelection(direction: .up)
+                return
+            case "l":
+                moveVisualSelection(direction: .right)
+                return
+            case "y":
+                yankVisualSelection()
+                return
+            case "d":
+                deleteVisualSelection()
+                return
+            default:
+                break
+            }
+        }
+
+        // Handle visual line mode
+        if editorMode == .visualLine,
+            event.keyCode != kVK_Escape,
+            let chars = event.charactersIgnoringModifiers
+        {
+            let key = chars.lowercased()
+
+            switch key {
+            case "j":
+                moveVisualLineSelection(direction: .down)
+                return
+            case "k":
+                moveVisualLineSelection(direction: .up)
+                return
+            case "y":
+                yankVisualLineSelection()
+                return
+            case "d":
+                deleteVisualLineSelection()
+                return
+            default:
+                break
+            }
+        }
+
         if editorMode == .normal,
             event.modifierFlags.intersection([.command, .option, .control]).isEmpty,
             let chars = event.charactersIgnoringModifiers
@@ -1311,6 +1387,17 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
                 undoManager?.undo()
                 return
 
+            // Visual mode
+            case "v":
+                if isShiftPressed {
+                    // V - enter visual line mode
+                    enterVisualLineMode()
+                } else {
+                    // v - enter visual mode
+                    enterVisualMode()
+                }
+                return
+
             default:
                 // Handle replace character
                 if pendingR != nil, let char = event.charactersIgnoringModifiers?.first {
@@ -1348,6 +1435,15 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
                 return
             }
             shouldIgnoreEscapeNavigation = false
+
+            // Exit visual modes
+            if editorMode == .visual || editorMode == .visualLine {
+                enterNormalMode()
+                let cursor = selectedRange().location
+                setSelectedRange(NSRange(location: cursor, length: 0))
+                didConsumeEscapeForVim = true
+                return
+            }
 
             if isSearchBarVisible {
                 hideSearchBar()
@@ -2371,6 +2467,114 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             storage.replaceCharacters(in: range, with: replacement)
             didChangeText()
             setSelectedRange(NSRange(location: cursor, length: 0))
+        }
+    }
+
+    // MARK: - Visual Mode Helpers
+
+    private enum VisualDirection {
+        case left, right, up, down
+    }
+
+    private func moveVisualSelection(direction: VisualDirection) {
+        guard let storage = textStorage else { return }
+        let nsString = storage.string as NSString
+        let currentRange = selectedRange()
+        var newCursor = currentRange.location + currentRange.length
+
+        switch direction {
+        case .left:
+            if newCursor > 0 {
+                newCursor -= 1
+            }
+        case .right:
+            if newCursor < nsString.length {
+                newCursor += 1
+            }
+        case .up:
+            moveUp(self)
+            newCursor = selectedRange().location
+        case .down:
+            moveDown(self)
+            newCursor = selectedRange().location
+        }
+
+        // Calculate selection range
+        let start = min(visualAnchor, newCursor)
+        let end = max(visualAnchor, newCursor)
+        setSelectedRange(NSRange(location: start, length: end - start))
+    }
+
+    private func yankVisualSelection() {
+        let range = selectedRange()
+        guard range.length > 0, let storage = textStorage else { return }
+        let nsString = storage.string as NSString
+        let text = nsString.substring(with: range)
+        copyToPasteboard(text)
+        enterNormalMode()
+        setSelectedRange(NSRange(location: range.location, length: 0))
+    }
+
+    private func deleteVisualSelection() {
+        let range = selectedRange()
+        guard range.length > 0 else { return }
+        if shouldChangeText(in: range, replacementString: "") {
+            textStorage?.replaceCharacters(in: range, with: "")
+            didChangeText()
+            enterNormalMode()
+            setSelectedRange(NSRange(location: range.location, length: 0))
+        }
+    }
+
+    private func moveVisualLineSelection(direction: VisualDirection) {
+        guard let storage = textStorage else { return }
+        let nsString = storage.string as NSString
+        let currentRange = selectedRange()
+        var currentLineRange = nsString.lineRange(for: currentRange)
+
+        switch direction {
+        case .down:
+            let nextLineStart = currentLineRange.upperBound
+            if nextLineStart < nsString.length {
+                let nextLineRange = nsString.lineRange(for: NSRange(location: nextLineStart, length: 0))
+                currentLineRange = NSUnionRange(currentLineRange, nextLineRange)
+            }
+        case .up:
+            if currentLineRange.location > 0 {
+                let prevLineStart = currentLineRange.location - 1
+                let prevLineRange = nsString.lineRange(for: NSRange(location: prevLineStart, length: 0))
+                currentLineRange = NSUnionRange(currentLineRange, prevLineRange)
+            }
+        default:
+            break
+        }
+
+        // Calculate selection from anchor
+        let anchorLineRange = nsString.lineRange(for: NSRange(location: visualAnchor, length: 0))
+        let start = min(anchorLineRange.location, currentLineRange.location)
+        let end = max(anchorLineRange.upperBound, currentLineRange.upperBound)
+        setSelectedRange(NSRange(location: start, length: end - start))
+    }
+
+    private func yankVisualLineSelection() {
+        let range = selectedRange()
+        guard range.length > 0, let storage = textStorage else { return }
+        let nsString = storage.string as NSString
+        let text = nsString.substring(with: range)
+        copyToPasteboard(text)
+        enterNormalMode()
+        let lineStart = nsString.lineRange(for: NSRange(location: range.location, length: 0)).location
+        setSelectedRange(NSRange(location: lineStart, length: 0))
+    }
+
+    private func deleteVisualLineSelection() {
+        let range = selectedRange()
+        guard range.length > 0 else { return }
+        if shouldChangeText(in: range, replacementString: "") {
+            textStorage?.replaceCharacters(in: range, with: "")
+            didChangeText()
+            enterNormalMode()
+            setSelectedRange(NSRange(location: range.location, length: 0))
         }
     }
 }

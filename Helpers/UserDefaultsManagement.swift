@@ -87,6 +87,7 @@ public enum UserDefaultsManagement {
         static let SplitViewMode = "splitViewMode"
         static let EditorContentSplitPosition = "editorContentSplitPosition"
         static let EditorModeKey = "editorMode"
+        static let VimModeEnabled = "vimModeEnabled"
     }
 
     private static func resolvedFontName(forKey key: String) -> String {
@@ -177,6 +178,18 @@ public enum UserDefaultsManagement {
         }
         set {
             UserDefaults.standard.set(newValue, forKey: Constants.AlwaysOnTop)
+        }
+    }
+
+    static var vimModeEnabled: Bool {
+        get {
+            if let result = UserDefaults.standard.object(forKey: Constants.VimModeEnabled) as? Bool {
+                return result
+            }
+            return false
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Constants.VimModeEnabled)
         }
     }
 

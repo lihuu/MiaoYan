@@ -91,6 +91,12 @@ final class EditorPrefsViewController: BasePrefsViewController {
         )
         settingsStackView.addArrangedSubview(widthRow)
 
+        let vimModeRow = createToggleRow(
+            label: I18n.str("Vim Mode:"),
+            action: #selector(vimModeChanged(_:))
+        )
+        settingsStackView.addArrangedSubview(vimModeRow)
+
         NSLayoutConstraint.activate([
             settingsStackView.topAnchor.constraint(equalTo: sectionView.topAnchor, constant: topSpacing),
             settingsStackView.leadingAnchor.constraint(equalTo: sectionView.leadingAnchor, constant: horizontalInset),
@@ -170,11 +176,43 @@ final class EditorPrefsViewController: BasePrefsViewController {
         return rowView
     }
 
+    private func createToggleRow(label: String, action: Selector) -> NSView {
+        let rowView = NSView()
+        rowView.translatesAutoresizingMaskIntoConstraints = false
+
+        let labelView = NSTextField(labelWithString: label)
+        labelView.translatesAutoresizingMaskIntoConstraints = false
+        labelView.alignment = .left
+
+        let toggle = NSSwitch()
+        toggle.translatesAutoresizingMaskIntoConstraints = false
+        toggle.target = self
+        toggle.action = action
+
+        rowView.addSubview(labelView)
+        rowView.addSubview(toggle)
+
+        NSLayoutConstraint.activate([
+            labelView.leadingAnchor.constraint(equalTo: rowView.leadingAnchor),
+            labelView.centerYAnchor.constraint(equalTo: rowView.centerYAnchor),
+            labelView.widthAnchor.constraint(equalToConstant: 140),
+
+            toggle.leadingAnchor.constraint(equalTo: labelView.trailingAnchor, constant: 16),
+            toggle.centerYAnchor.constraint(equalTo: rowView.centerYAnchor),
+
+            rowView.heightAnchor.constraint(equalToConstant: 24),
+            rowView.trailingAnchor.constraint(greaterThanOrEqualTo: toggle.trailingAnchor),
+        ])
+
+        return rowView
+    }
+
     override func setupValues() {
         selectLineBreakOption(settings.editorLineBreak)
         selectUploadServiceOption(UserDefaultsManagement.defaultPicUpload)
         selectPreviewLocationOption(settings.previewLocation)
         selectPreviewWidthOption(settings.previewWidth)
+        selectVimModeOption(UserDefaultsManagement.vimModeEnabled)
     }
 
     private func selectLineBreakOption(_ value: String) {
@@ -209,6 +247,13 @@ final class EditorPrefsViewController: BasePrefsViewController {
         }
     }
 
+    private func selectVimModeOption(_ enabled: Bool) {
+        guard settingsStackView.arrangedSubviews.count > 4,
+            let toggle = settingsStackView.arrangedSubviews[4].subviews.first(where: { $0 is NSSwitch }) as? NSSwitch
+        else { return }
+        toggle.state = enabled ? .on : .off
+    }
+
     // MARK: - Actions
 
     @objc private func lineBreakChanged(_ sender: NSPopUpButton) {
@@ -236,6 +281,10 @@ final class EditorPrefsViewController: BasePrefsViewController {
         if title != "None", let vc = ViewController.shared() {
             vc.toastImageSet(name: title)
         }
+    }
+
+    @objc private func vimModeChanged(_ sender: NSSwitch) {
+        UserDefaultsManagement.vimModeEnabled = (sender.state == .on)
     }
 
     // MARK: - Localization Helpers for raw/display mapping

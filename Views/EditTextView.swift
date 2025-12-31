@@ -103,12 +103,14 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
 
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
-        vimHandler.initializeStatusBar(in: window?.contentView)
+        if UserDefaultsManagement.vimModeEnabled {
+            vimHandler.initializeStatusBar(in: window?.contentView)
+        }
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window != nil {
+        if window != nil, UserDefaultsManagement.vimModeEnabled {
             vimHandler.initializeStatusBar(in: window?.contentView)
         }
     }
@@ -1064,6 +1066,34 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
 
     override func keyDown(with event: NSEvent) {
         imagePreviewManager?.hideImagePreview()
+
+        // Skip vim mode handling if vim mode is disabled
+        guard UserDefaultsManagement.vimModeEnabled else {
+            // Still handle ESC to exit search bar
+            if event.keyCode == kVK_Escape {
+                if hasMarkedText() {
+                    shouldIgnoreEscapeNavigation = true
+                    super.keyDown(with: event)
+                    return
+                }
+                shouldIgnoreEscapeNavigation = false
+                if isSearchBarVisible {
+                    hideSearchBar()
+                    return
+                }
+                if markdownView?.isSearchBarVisible == true {
+                    markdownView?.hideSearchBar()
+                    return
+                }
+            }
+            // Handle tab for shortcut expansion
+            if event.keyCode == kVK_Tab, !hasMarkedText(), !event.modifierFlags.contains(.shift), handleShortcutExpansion() {
+                saveCursorPosition()
+                return
+            }
+            super.keyDown(with: event)
+            return
+        }
 
         // Handle vim modes via handler
         let keyCode = event.keyCode

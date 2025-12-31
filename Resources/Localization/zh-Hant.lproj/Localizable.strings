@@ -173,6 +173,7 @@
 
 /* No comment provided by engineer. */
 "This %@ under this folder already exists!" = "此檔案夾下的 $@ 已經存在！";
+"Vim Mode:" = "Vim 模式:";
 
 /* Delete menu */
 "This action cannot be undone." = "本動作不可復原。";

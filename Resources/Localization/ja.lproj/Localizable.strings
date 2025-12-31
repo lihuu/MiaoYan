@@ -173,6 +173,7 @@
 "🙊 Press ESC key to exit~" = "🙊 ESC キーを押して終了します。";
 
 "😶‍🌫 Format is only possible after exiting preview mode~" = "😶‍🌫 フォーマットの為に、プレビューモードを終了してください。";
+"Vim Mode:" = "Vim モード:";
 
 "😶‍🌫 PDF export failed, please try again~" = "😶‍🌫 PDFエクスポートに失敗しました。もう一度お試しください。";
 

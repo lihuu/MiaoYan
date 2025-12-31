@@ -72,29 +72,11 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
     // Debounce appearance changes to avoid flashing
     private var lastAppearanceChangeTime: TimeInterval = 0
 
-    private enum EditorMode {
-        case insert
-        case normal
-        case visual
-        case visualLine
-        case command
-    }
-
-    private enum PendingOperator {
-        case none
-        case delete
-        case yank
-        case change
-    }
-
-    private var editorMode: EditorMode = .normal
-    private var pendingOperator: PendingOperator = .none
-    private var pendingG: Bool = false
-    private var pendingR: Character? = nil
-    private var visualAnchor: Int = 0
-    private var commandBuffer: String = ""
-    private var statusBarView: NSView?
-    private var statusBarLabel: NSTextField?
+    // Vim mode handler
+    private lazy var vimHandler: VimModeHandler = {
+        let handler = VimModeHandler(delegate: self)
+        return handler
+    }()
     override var textContainerOrigin: NSPoint {
         var origin = super.textContainerOrigin
         if bottomPadding > 0 {
@@ -115,21 +97,19 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             defaultVerticalInset = textContainerInset.height
             hasCapturedDefaultVerticalInset = true
             bottomPadding = 0
-            updateCaretStyle()
-            initializeStatusBar()
+            _ = vimHandler  // Initialize vim handler
         }
     }
 
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
-        initializeStatusBar()
+        vimHandler.initializeStatusBar(in: window?.contentView)
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window != nil {
-            print("[VimMode] viewDidMoveToWindow - window is available")
-            initializeStatusBar()
+            vimHandler.initializeStatusBar(in: window?.contentView)
         }
     }
 
@@ -158,7 +138,7 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
     }
 
     override func insertText(_ insertString: Any) {
-        guard editorMode == .insert else {
+        guard vimHandler.editorMode == .insert else {
             NSSound.beep()
             return
         }
@@ -628,70 +608,6 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
         restoreCursorPosition(needScrollToCursor: options.needScrollToCursor)
     }
 
-    // MARK: - Vim Mode Helpers
-
-    private func enterInsertMode() {
-        editorMode = .insert
-        pendingOperator = .none
-        updateCaretStyle()
-    }
-
-    private func enterNormalMode() {
-        editorMode = .normal
-        pendingOperator = .none
-        updateCaretStyle()
-    }
-
-    private func enterVisualMode() {
-        editorMode = .visual
-        visualAnchor = selectedRange().location
-        updateCaretStyle()
-    }
-
-    private func enterVisualLineMode() {
-        guard let storage = textStorage else { return }
-        editorMode = .visualLine
-        let nsString = storage.string as NSString
-        let cursor = selectedRange().location
-        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
-        visualAnchor = lineRange.location
-        setSelectedRange(lineRange)
-        updateCaretStyle()
-    }
-
-    private func enterCommandMode() {
-        print("[VimMode] enterCommandMode called")
-        editorMode = .command
-        commandBuffer = ""
-        updateCaretStyle()
-    }
-
-    private func updateCaretStyle() {
-        let blockWidth = blockCaretWidth()
-        caretWidth = (editorMode == .normal || editorMode == .visual || editorMode == .visualLine) ? blockWidth : 1
-        setNeedsDisplay(bounds)
-        updateStatusBar()
-    }
-
-    private func blockCaretWidth() -> CGFloat {
-        // Prefer current typing attributes; fall back to storage font near the caret; finally default note font.
-        if let attrFont = typingAttributes[.font] as? NSFont {
-            let width = "W".size(withAttributes: [.font: attrFont]).width
-            return max(6, min(18, width))
-        }
-
-        if let storage = textStorage, storage.length > 0 {
-            let safeIndex = max(0, min(selectedRange().location, storage.length - 1))
-            if let storageFont = storage.attribute(.font, at: safeIndex, effectiveRange: nil) as? NSFont {
-                let width = "W".size(withAttributes: [.font: storageFont]).width
-                return max(6, min(18, width))
-            }
-        }
-
-        let fallbackFont = UserDefaultsManagement.noteFont
-        let width = "W".size(withAttributes: [.font: fallbackFont]).width
-        return max(6, min(18, width))
-    }
     public func clear() {
         hideSearchBar()
         splitViewUpdateTimer?.invalidate()
@@ -707,7 +623,7 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             viewController.updateTitle(newTitle: "")
         }
         EditTextView.note = nil
-        enterNormalMode()
+        vimHandler.enterNormalMode()
     }
 
     // MARK: - Editor Utility Helpers
@@ -1149,341 +1065,30 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
     override func keyDown(with event: NSEvent) {
         imagePreviewManager?.hideImagePreview()
 
-        // Handle visual mode
-        // Handle command mode
-        if editorMode == .command,
-            let chars = event.charactersIgnoringModifiers
-        {
-            let keyCode = event.keyCode
+        // Handle vim modes via handler
+        let keyCode = event.keyCode
+        let chars = event.charactersIgnoringModifiers
+        let isShiftPressed = event.modifierFlags.contains(.shift)
+        let hasModifiers = !event.modifierFlags.intersection([.command, .option, .control]).isEmpty
 
-            // Backspace/Delete to remove last character
-            if keyCode == kVK_Delete || keyCode == kVK_ForwardDelete {
-                if !commandBuffer.isEmpty {
-                    commandBuffer.removeLast()
-                    updateStatusBar()
-                }
-                return
-            }
-
-            // Enter to execute command
-            if keyCode == kVK_Return {
-                executeCommand(commandBuffer)
-                commandBuffer = ""
-                enterNormalMode()
-                return
-            }
-
-            // Escape to cancel command
-            if keyCode == kVK_Escape {
-                commandBuffer = ""
-                enterNormalMode()
-                return
-            }
-
-            // Add character to command buffer (letters and numbers)
-            if let char = chars.first, char.isLetter || char.isNumber || char == " " {
-                commandBuffer.append(char)
-                updateStatusBar()
-                return
-            }
+        // Command mode handling
+        if vimHandler.handleCommandModeKey(keyCode: keyCode, characters: chars) {
+            return
         }
 
-        // Handle visual mode
-        if editorMode == .visual,
-            event.keyCode != kVK_Escape,
-            let chars = event.charactersIgnoringModifiers
-        {
-            let key = chars.lowercased()
-
-            switch key {
-            case "h":
-                moveVisualSelection(direction: .left)
-                return
-            case "j":
-                moveVisualSelection(direction: .down)
-                return
-            case "k":
-                moveVisualSelection(direction: .up)
-                return
-            case "l":
-                moveVisualSelection(direction: .right)
-                return
-            case "y":
-                yankVisualSelection()
-                return
-            case "d":
-                deleteVisualSelection()
-                return
-            default:
-                break
-            }
+        // Visual mode handling
+        if vimHandler.handleVisualModeKey(keyCode: keyCode, characters: chars) {
+            return
         }
 
-        // Handle visual line mode
-        if editorMode == .visualLine,
-            event.keyCode != kVK_Escape,
-            let chars = event.charactersIgnoringModifiers
-        {
-            let key = chars.lowercased()
-
-            switch key {
-            case "j":
-                moveVisualLineSelection(direction: .down)
-                return
-            case "k":
-                moveVisualLineSelection(direction: .up)
-                return
-            case "y":
-                yankVisualLineSelection()
-                return
-            case "d":
-                deleteVisualLineSelection()
-                return
-            default:
-                break
-            }
+        // Visual line mode handling
+        if vimHandler.handleVisualLineModeKey(keyCode: keyCode, characters: chars) {
+            return
         }
 
-        if editorMode == .normal,
-            event.modifierFlags.intersection([.command, .option, .control]).isEmpty,
-            let chars = event.charactersIgnoringModifiers
-        {
-            let key = chars.lowercased()
-            let isShiftPressed = event.modifierFlags.contains(.shift)
-
-            switch key {
-            // Basic movement
-            case "h":
-                moveLeft(self)
-                return
-            case "j":
-                moveDown(self)
-                return
-            case "k":
-                moveUp(self)
-                return
-            case "l":
-                moveRight(self)
-                return
-
-            // Line movement
-            case "0":
-                moveToBeginningOfLine(self)
-                return
-            case "$":
-                if pendingOperator != .none {
-                    handlePendingOperator(withMotion: "$")
-                    pendingOperator = .none
-                } else {
-                    moveToEndOfLine(self)
-                }
-                return
-            case "^":
-                if pendingOperator != .none {
-                    handlePendingOperator(withMotion: "^")
-                    pendingOperator = .none
-                } else {
-                    moveToBeginningOfLineNonWhitespace()
-                }
-                return
-
-            // Word movement
-            case "w":
-                if isShiftPressed {
-                    // W - WORD forward
-                    if pendingOperator != .none {
-                        handlePendingOperator(withMotion: "W")
-                        pendingOperator = .none
-                    } else {
-                        moveWordForward(bigWord: true)
-                    }
-                } else {
-                    // w - word forward
-                    if pendingOperator != .none {
-                        handlePendingOperator(withMotion: "w")
-                        pendingOperator = .none
-                    } else {
-                        moveWordForward(bigWord: false)
-                    }
-                }
-                return
-            case "b":
-                if isShiftPressed {
-                    // B - WORD backward
-                    if pendingOperator != .none {
-                        handlePendingOperator(withMotion: "B")
-                        pendingOperator = .none
-                    } else {
-                        moveWordBackward(bigWord: true)
-                    }
-                } else {
-                    // b - word backward
-                    if pendingOperator != .none {
-                        handlePendingOperator(withMotion: "b")
-                        pendingOperator = .none
-                    } else {
-                        moveWordBackward(bigWord: false)
-                    }
-                }
-                return
-
-            // File movement
-            case "g":
-                if isShiftPressed {
-                    // G - go to end of file or operate to end
-                    if pendingOperator != .none {
-                        // dG, yG, cG - operate from current position to end of file
-                        handlePendingOperator(withMotion: "G")
-                        pendingOperator = .none
-                    } else {
-                        moveToEndOfDocument(self)
-                    }
-                } else {
-                    // g - needs another g to go to beginning
-                    if pendingG {
-                        moveToBeginningOfDocument(self)
-                        pendingG = false
-                    } else {
-                        pendingG = true
-                        // Set a timer to reset pendingG after a short delay
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                            self?.pendingG = false
-                        }
-                    }
-                }
-                return
-
-            // Enter insert mode
-            case "i":
-                if isShiftPressed {
-                    // I - insert at beginning of line
-                    moveToBeginningOfLineNonWhitespace()
-                    enterInsertMode()
-                } else {
-                    // i - insert at cursor
-                    enterInsertMode()
-                }
-                return
-            case "a":
-                if isShiftPressed {
-                    // A - append at end of line
-                    moveToEndOfLine(self)
-                    enterInsertMode()
-                } else {
-                    // a - append after cursor
-                    moveRight(self)
-                    enterInsertMode()
-                }
-                return
-            case "o":
-                if isShiftPressed {
-                    // O - insert line above
-                    insertLineAbove()
-                } else {
-                    // o - insert line below
-                    insertLineBelow()
-                }
-                return
-
-            // Delete operations
-            case "x":
-                deleteCharacterAtCursor()
-                return
-            case "d":
-                if isShiftPressed {
-                    // D - delete to end of line
-                    deleteToEndOfLine()
-                } else {
-                    // d - delete operator
-                    if pendingOperator == .delete {
-                        deleteCurrentLine()
-                        pendingOperator = .none
-                    } else {
-                        pendingOperator = .delete
-                    }
-                }
-                return
-
-            // Yank operations
-            case "y":
-                if pendingOperator == .yank {
-                    yankCurrentLine()
-                    pendingOperator = .none
-                } else {
-                    pendingOperator = .yank
-                }
-                return
-
-            // Change operations
-            case "c":
-                if isShiftPressed {
-                    // C - change to end of line
-                    changeToEndOfLine()
-                } else {
-                    // c - change operator
-                    if pendingOperator == .change {
-                        changeCurrentLine()
-                        pendingOperator = .none
-                    } else {
-                        pendingOperator = .change
-                    }
-                }
-                return
-
-            // Paste
-            case "p":
-                if isShiftPressed {
-                    // P - paste before cursor
-                    pasteBeforeCursor()
-                } else {
-                    // p - paste after cursor
-                    pasteAfterCursor()
-                }
-                return
-
-            // Replace
-            case "r":
-                // Wait for next character to replace
-                pendingR = " "  // placeholder
-                return
-
-            // Undo
-            case "u":
-                undoManager?.undo()
-                return
-
-            // Visual mode
-            case "v":
-                if isShiftPressed {
-                    // V - enter visual line mode
-                    enterVisualLineMode()
-                } else {
-                    // v - enter visual mode
-                    enterVisualMode()
-                }
-                return
-
-            // Command mode
-            case ":":
-                print("[VimMode] ':' key pressed in normal mode")
-                enterCommandMode()
-                return
-
-            default:
-                // Handle replace character
-                if pendingR != nil, let char = event.charactersIgnoringModifiers?.first {
-                    replaceCharacterAtCursor(with: char)
-                    pendingR = nil
-                    return
-                }
-
-                if pendingOperator != .none {
-                    NSSound.beep()
-                    pendingOperator = .none
-                    return
-                }
-                break
-            }
+        // Normal mode handling (only without modifiers)
+        if !hasModifiers, vimHandler.handleNormalModeKey(keyCode: keyCode, characters: chars, isShiftPressed: isShiftPressed) {
+            return
         }
 
         guard
@@ -1508,8 +1113,8 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             shouldIgnoreEscapeNavigation = false
 
             // Exit visual modes
-            if editorMode == .visual || editorMode == .visualLine {
-                enterNormalMode()
+            if vimHandler.editorMode == .visual || vimHandler.editorMode == .visualLine {
+                vimHandler.enterNormalMode()
                 let cursor = selectedRange().location
                 setSelectedRange(NSRange(location: cursor, length: 0))
                 didConsumeEscapeForVim = true
@@ -1518,17 +1123,17 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
 
             if isSearchBarVisible {
                 hideSearchBar()
-                enterNormalMode()
+                vimHandler.enterNormalMode()
                 didConsumeEscapeForVim = true
                 return
             }
             if markdownView?.isSearchBarVisible == true {
                 markdownView?.hideSearchBar()
-                enterNormalMode()
+                vimHandler.enterNormalMode()
                 didConsumeEscapeForVim = true
                 return
             }
-            enterNormalMode()
+            vimHandler.enterNormalMode()
             didConsumeEscapeForVim = true
             return
         }
@@ -2096,671 +1701,84 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
         layoutManager?.ensureLayout(for: textContainer!)
         didChangeText()
     }
+}
 
-    // MARK: - Vim Normal Mode Helpers
+// MARK: - VimTextViewDelegate
 
-    private func deleteCharacterAtCursor() {
-        guard let storage = textStorage else { return }
-        let cursor = selectedRange().location
-        guard cursor < storage.length else { return }
-        let range = NSRange(location: cursor, length: 1)
-        if shouldChangeText(in: range, replacementString: "") {
-            storage.replaceCharacters(in: range, with: "")
-            didChangeText()
-            setSelectedRange(NSRange(location: min(cursor, storage.length), length: 0))
+extension EditTextView: VimTextViewDelegate {
+    var vimTextStorage: NSTextStorage? { textStorage }
+    var vimSelectedRange: NSRange { selectedRange() }
+    var vimTypingAttributes: [NSAttributedString.Key: Any] { typingAttributes }
+
+    func vimSetSelectedRange(_ range: NSRange) {
+        setSelectedRange(range)
+    }
+
+    func vimShouldChangeText(in range: NSRange, replacementString: String?) -> Bool {
+        shouldChangeText(in: range, replacementString: replacementString)
+    }
+
+    func vimDidChangeText() {
+        didChangeText()
+    }
+
+    func vimReplaceCharacters(in range: NSRange, with string: String) {
+        textStorage?.replaceCharacters(in: range, with: string)
+    }
+
+    func vimMoveLeft() {
+        moveLeft(self)
+    }
+
+    func vimMoveRight() {
+        moveRight(self)
+    }
+
+    func vimMoveUp() {
+        moveUp(self)
+    }
+
+    func vimMoveDown() {
+        moveDown(self)
+    }
+
+    func vimMoveToBeginningOfLine() {
+        moveToBeginningOfLine(self)
+    }
+
+    func vimMoveToEndOfLine() {
+        moveToEndOfLine(self)
+    }
+
+    func vimMoveToBeginningOfDocument() {
+        moveToBeginningOfDocument(self)
+    }
+
+    func vimMoveToEndOfDocument() {
+        moveToEndOfDocument(self)
+    }
+
+    func vimUndo() {
+        undoManager?.undo()
+    }
+
+    func vimSetCaretWidth(_ width: CGFloat) {
+        caretWidth = width
+    }
+
+    func vimSetNeedsDisplay() {
+        setNeedsDisplay(bounds)
+    }
+
+    func vimSaveNote() {
+        if let note = EditTextView.note {
+            saveTextStorageContent(to: note)
+            note.save()
+            EditTextView.shouldForceRescan = true
         }
     }
 
-    private func deleteCurrentLine() {
-        guard let storage = textStorage else { return }
-        let nsString = storage.string as NSString
-        let cursor = selectedRange().location
-        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
-        if shouldChangeText(in: lineRange, replacementString: "") {
-            storage.replaceCharacters(in: lineRange, with: "")
-            didChangeText()
-            let newLocation = min(lineRange.location, storage.length)
-            setSelectedRange(NSRange(location: newLocation, length: 0))
-        }
-    }
-
-    private func yankCurrentLine() {
-        guard let storage = textStorage else { return }
-        let nsString = storage.string as NSString
-        let cursor = selectedRange().location
-        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
-        let text = nsString.substring(with: lineRange)
-        copyToPasteboard(text)
-    }
-
-    private func handlePendingOperator(withMotion motion: String) {
-        guard let range = motionRange(for: motion) else {
-            NSSound.beep()
-            return
-        }
-
-        switch pendingOperator {
-        case .delete:
-            applyDelete(range: range)
-        case .yank:
-            applyYank(range: range)
-        case .change:
-            applyChange(range: range)
-        case .none:
-            break
-        }
-    }
-
-    private func applyChange(range: NSRange) {
-        guard let storage = textStorage, range.length > 0 else { return }
-        if shouldChangeText(in: range, replacementString: "") {
-            storage.replaceCharacters(in: range, with: "")
-            didChangeText()
-            setSelectedRange(NSRange(location: range.location, length: 0))
-            enterInsertMode()
-        }
-    }
-
-    private func motionRange(for motion: String) -> NSRange? {
-        guard let storage = textStorage else { return nil }
-        let nsString = storage.string as NSString
-        let cursor = selectedRange().location
-        let length = nsString.length
-        guard cursor <= length else { return nil }
-
-        switch motion {
-        case "w":
-            let target = nextWordBoundary(from: cursor, bigWord: false)
-            return target > cursor ? NSRange(location: cursor, length: target - cursor) : nil
-        case "W":
-            let target = nextWordBoundary(from: cursor, bigWord: true)
-            return target > cursor ? NSRange(location: cursor, length: target - cursor) : nil
-        case "b":
-            let target = previousWordBoundary(from: cursor, bigWord: false)
-            return target < cursor ? NSRange(location: target, length: cursor - target) : nil
-        case "B":
-            let target = previousWordBoundary(from: cursor, bigWord: true)
-            return target < cursor ? NSRange(location: target, length: cursor - target) : nil
-        case "$":
-            let lineRange = nsString.lineRange(for: NSRange(location: min(cursor, max(length - 1, 0)), length: 0))
-            var end = lineRange.upperBound
-            if end > lineRange.location {
-                let ch = nsString.character(at: end - 1)
-                if ch == 0x0A || ch == 0x0D {  // \n or \r
-                    end -= 1
-                }
-            }
-            return end > cursor ? NSRange(location: cursor, length: end - cursor) : nil
-        case "^":
-            let lineRange = nsString.lineRange(for: NSRange(location: min(cursor, max(length - 1, 0)), length: 0))
-            let start = firstNonSpace(in: nsString, range: lineRange)
-            return start < cursor ? NSRange(location: start, length: cursor - start) : nil
-        case "G":
-            // G - from current line to end of file (including all lines)
-            let currentLineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
-            let startPos = currentLineRange.location
-            return length > startPos ? NSRange(location: startPos, length: length - startPos) : nil
-        default:
-            return nil
-        }
-    }
-
-    private func previousWordBoundary(from index: Int, bigWord: Bool) -> Int {
-        guard let storage = textStorage else { return index }
-        let nsString = storage.string as NSString
-        guard index > 0 else { return 0 }
-
-        var i = index - 1
-
-        func isWordChar(_ c: unichar) -> Bool {
-            if bigWord {
-                return c != 0x20 && c != 0x09 && c != 0x0A && c != 0x0D
-            }
-            if let scalar = Unicode.Scalar(c) {
-                return CharacterSet.alphanumerics.contains(scalar) || c == 95
-            }
-            return false
-        }
-
-        // Skip whitespace
-        while i > 0 {
-            let ch = nsString.character(at: i)
-            if ch != 0x20 && ch != 0x09 && ch != 0x0A && ch != 0x0D {
-                break
-            }
-            i -= 1
-        }
-
-        // Move to beginning of word
-        let targetIsWord = isWordChar(nsString.character(at: i))
-        while i > 0 {
-            let ch = nsString.character(at: i - 1)
-            if isWordChar(ch) != targetIsWord {
-                break
-            }
-            i -= 1
-        }
-
-        return i
-    }
-
-    private func nextWordBoundary(from index: Int, bigWord: Bool) -> Int {
-        guard let storage = textStorage else { return index }
-        let nsString = storage.string as NSString
-        let length = nsString.length
-        var i = index
-        guard i < length else { return length }
-
-        func isWordChar(_ c: unichar) -> Bool {
-            if bigWord {
-                return c != 0x20 && c != 0x09 && c != 0x0A && c != 0x0D  // not space, tab, newline, carriage return
-            }
-            if let scalar = Unicode.Scalar(c) {
-                return CharacterSet.alphanumerics.contains(scalar) || c == 95  // underscore
-            }
-            return false
-        }
-
-        let currentIsWord = isWordChar(nsString.character(at: i))
-        while i < length && isWordChar(nsString.character(at: i)) == currentIsWord {
-            i += 1
-        }
-        while i < length {
-            let ch = nsString.character(at: i)
-            if ch != 0x20 && ch != 0x09 && ch != 0x0A && ch != 0x0D {  // not space, tab, newline, carriage return
-                break
-            }
-            i += 1
-        }
-        return i
-    }
-
-    private func firstNonSpace(in nsString: NSString, range: NSRange) -> Int {
-        let upper = range.location + range.length
-        var i = range.location
-        while i < upper {
-            let ch = nsString.character(at: i)
-            if ch != 0x20 && ch != 0x09 && ch != 0x0A && ch != 0x0D {  // not space, tab, newline, carriage return
-                return i
-            }
-            i += 1
-        }
-        return range.location
-    }
-
-    private func applyDelete(range: NSRange) {
-        guard let storage = textStorage, range.length > 0 else { return }
-        if shouldChangeText(in: range, replacementString: "") {
-            storage.replaceCharacters(in: range, with: "")
-            didChangeText()
-            setSelectedRange(NSRange(location: range.location, length: 0))
-        }
-    }
-
-    private func applyYank(range: NSRange) {
-        guard let storage = textStorage, range.length > 0 else { return }
-        let nsString = storage.string as NSString
-        let text = nsString.substring(with: range)
-        copyToPasteboard(text)
-    }
-
-    private func copyToPasteboard(_ text: String) {
-        let pb = NSPasteboard.general
-        pb.declareTypes([.string], owner: nil)
-        pb.setString(text, forType: .string)
-    }
-
-    // MARK: - Additional Vim Commands
-
-    // Line movement
-    private func moveToBeginningOfLineNonWhitespace() {
-        guard let storage = textStorage else { return }
-        let nsString = storage.string as NSString
-        let cursor = selectedRange().location
-        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
-        let start = firstNonSpace(in: nsString, range: lineRange)
-        setSelectedRange(NSRange(location: start, length: 0))
-    }
-
-    // Word movement
-    private func moveWordForward(bigWord: Bool) {
-        guard let storage = textStorage else { return }
-        let cursor = selectedRange().location
-        let target = nextWordBoundary(from: cursor, bigWord: bigWord)
-        setSelectedRange(NSRange(location: target, length: 0))
-    }
-
-    private func moveWordBackward(bigWord: Bool) {
-        guard let storage = textStorage else { return }
-        let nsString = storage.string as NSString
-        let cursor = selectedRange().location
-        guard cursor > 0 else { return }
-
-        var i = cursor - 1
-
-        func isWordChar(_ c: unichar) -> Bool {
-            if bigWord {
-                return c != 0x20 && c != 0x09 && c != 0x0A && c != 0x0D
-            }
-            if let scalar = Unicode.Scalar(c) {
-                return CharacterSet.alphanumerics.contains(scalar) || c == 95
-            }
-            return false
-        }
-
-        // Skip whitespace
-        while i > 0 {
-            let ch = nsString.character(at: i)
-            if ch != 0x20 && ch != 0x09 && ch != 0x0A && ch != 0x0D {
-                break
-            }
-            i -= 1
-        }
-
-        // Move to beginning of word
-        let targetIsWord = isWordChar(nsString.character(at: i))
-        while i > 0 {
-            let ch = nsString.character(at: i - 1)
-            if isWordChar(ch) != targetIsWord {
-                break
-            }
-            i -= 1
-        }
-
-        setSelectedRange(NSRange(location: i, length: 0))
-    }
-
-    // Insert lines
-    private func insertLineBelow() {
-        guard let storage = textStorage else { return }
-        let nsString = storage.string as NSString
-        let cursor = selectedRange().location
-        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
-
-        // Find the position at the end of the line (before the newline character)
-        var insertPos = lineRange.upperBound
-        if insertPos > lineRange.location {
-            let ch = nsString.character(at: insertPos - 1)
-            if ch == 0x0A || ch == 0x0D {
-                insertPos -= 1
-            }
-        }
-
-        let newLine = "\n"
-        let range = NSRange(location: insertPos, length: 0)
-        if shouldChangeText(in: range, replacementString: newLine) {
-            storage.replaceCharacters(in: range, with: newLine)
-            didChangeText()
-            setSelectedRange(NSRange(location: insertPos + 1, length: 0))
-            enterInsertMode()
-        }
-    }
-
-    private func insertLineAbove() {
-        guard let storage = textStorage else { return }
-        let nsString = storage.string as NSString
-        let cursor = selectedRange().location
-        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
-        let insertPos = lineRange.location
-
-        let newLine = "\n"
-        let range = NSRange(location: insertPos, length: 0)
-        if shouldChangeText(in: range, replacementString: newLine) {
-            storage.replaceCharacters(in: range, with: newLine)
-            didChangeText()
-            setSelectedRange(NSRange(location: insertPos, length: 0))
-            enterInsertMode()
-        }
-    }
-
-    // Delete operations
-    private func deleteToEndOfLine() {
-        guard let storage = textStorage else { return }
-        let nsString = storage.string as NSString
-        let cursor = selectedRange().location
-        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
-        var end = lineRange.upperBound
-        if end > lineRange.location {
-            let ch = nsString.character(at: end - 1)
-            if ch == 0x0A || ch == 0x0D {
-                end -= 1
-            }
-        }
-
-        if end > cursor {
-            let range = NSRange(location: cursor, length: end - cursor)
-            if shouldChangeText(in: range, replacementString: "") {
-                storage.replaceCharacters(in: range, with: "")
-                didChangeText()
-                setSelectedRange(NSRange(location: cursor, length: 0))
-            }
-        }
-    }
-
-    // Change operations
-    private func changeCurrentLine() {
-        guard let storage = textStorage else { return }
-        let nsString = storage.string as NSString
-        let cursor = selectedRange().location
-        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
-
-        // Find indent
-        var indent = ""
-        var i = lineRange.location
-        let upper = lineRange.location + lineRange.length
-        while i < upper {
-            let ch = nsString.character(at: i)
-            if ch == 0x20 || ch == 0x09 {
-                indent.append(Character(UnicodeScalar(ch)!))
-                i += 1
-            } else {
-                break
-            }
-        }
-
-        let replacement = indent + "\n"
-        if shouldChangeText(in: lineRange, replacementString: replacement) {
-            storage.replaceCharacters(in: lineRange, with: replacement)
-            didChangeText()
-            setSelectedRange(NSRange(location: lineRange.location + indent.count, length: 0))
-            enterInsertMode()
-        }
-    }
-
-    private func changeToEndOfLine() {
-        deleteToEndOfLine()
-        enterInsertMode()
-    }
-
-    // Paste operations
-    private func pasteAfterCursor() {
-        let pb = NSPasteboard.general
-        guard let text = pb.string(forType: .string), !text.isEmpty else { return }
-        guard let storage = textStorage else { return }
-
-        var cursor = selectedRange().location
-
-        // If text ends with newline, it's a line paste
-        if text.hasSuffix("\n") {
-            let nsString = storage.string as NSString
-            let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
-            cursor = lineRange.upperBound
-        } else {
-            // Move one character right for character paste
-            cursor = min(cursor + 1, storage.length)
-        }
-
-        let range = NSRange(location: cursor, length: 0)
-        if shouldChangeText(in: range, replacementString: text) {
-            storage.replaceCharacters(in: range, with: text)
-            didChangeText()
-
-            // Position cursor at end of pasted text (minus trailing newline if present)
-            let newPos = text.hasSuffix("\n") ? cursor + text.count - 1 : cursor + text.count - 1
-            setSelectedRange(NSRange(location: max(cursor, min(newPos, storage.length - 1)), length: 0))
-        }
-    }
-
-    private func pasteBeforeCursor() {
-        let pb = NSPasteboard.general
-        guard let text = pb.string(forType: .string), !text.isEmpty else { return }
-        guard let storage = textStorage else { return }
-
-        var cursor = selectedRange().location
-
-        // If text ends with newline, it's a line paste
-        if text.hasSuffix("\n") {
-            let nsString = storage.string as NSString
-            let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
-            cursor = lineRange.location
-        }
-
-        let range = NSRange(location: cursor, length: 0)
-        if shouldChangeText(in: range, replacementString: text) {
-            storage.replaceCharacters(in: range, with: text)
-            didChangeText()
-
-            // Position cursor at end of pasted text (minus trailing newline if present)
-            let newPos = text.hasSuffix("\n") ? cursor + text.count - 1 : cursor + text.count - 1
-            setSelectedRange(NSRange(location: max(cursor, min(newPos, storage.length - 1)), length: 0))
-        }
-    }
-
-    // Replace character
-    private func replaceCharacterAtCursor(with char: Character) {
-        guard let storage = textStorage else { return }
-        let cursor = selectedRange().location
-        guard cursor < storage.length else { return }
-
-        let replacement = String(char)
-        let range = NSRange(location: cursor, length: 1)
-        if shouldChangeText(in: range, replacementString: replacement) {
-            storage.replaceCharacters(in: range, with: replacement)
-            didChangeText()
-            setSelectedRange(NSRange(location: cursor, length: 0))
-        }
-    }
-
-    // MARK: - Visual Mode Helpers
-
-    private enum VisualDirection {
-        case left, right, up, down
-    }
-
-    private func moveVisualSelection(direction: VisualDirection) {
-        guard let storage = textStorage else { return }
-        let nsString = storage.string as NSString
-        let currentRange = selectedRange()
-        var newCursor = currentRange.location + currentRange.length
-
-        switch direction {
-        case .left:
-            if newCursor > 0 {
-                newCursor -= 1
-            }
-        case .right:
-            if newCursor < nsString.length {
-                newCursor += 1
-            }
-        case .up:
-            moveUp(self)
-            newCursor = selectedRange().location
-        case .down:
-            moveDown(self)
-            newCursor = selectedRange().location
-        }
-
-        // Calculate selection range
-        let start = min(visualAnchor, newCursor)
-        let end = max(visualAnchor, newCursor)
-        setSelectedRange(NSRange(location: start, length: end - start))
-    }
-
-    private func yankVisualSelection() {
-        let range = selectedRange()
-        guard range.length > 0, let storage = textStorage else { return }
-        let nsString = storage.string as NSString
-        let text = nsString.substring(with: range)
-        copyToPasteboard(text)
-        enterNormalMode()
-        setSelectedRange(NSRange(location: range.location, length: 0))
-    }
-
-    private func deleteVisualSelection() {
-        let range = selectedRange()
-        guard range.length > 0 else { return }
-        if shouldChangeText(in: range, replacementString: "") {
-            textStorage?.replaceCharacters(in: range, with: "")
-            didChangeText()
-            enterNormalMode()
-            setSelectedRange(NSRange(location: range.location, length: 0))
-        }
-    }
-
-    private func moveVisualLineSelection(direction: VisualDirection) {
-        guard let storage = textStorage else { return }
-        let nsString = storage.string as NSString
-        let currentRange = selectedRange()
-        var currentLineRange = nsString.lineRange(for: currentRange)
-
-        switch direction {
-        case .down:
-            let nextLineStart = currentLineRange.upperBound
-            if nextLineStart < nsString.length {
-                let nextLineRange = nsString.lineRange(for: NSRange(location: nextLineStart, length: 0))
-                currentLineRange = NSUnionRange(currentLineRange, nextLineRange)
-            }
-        case .up:
-            if currentLineRange.location > 0 {
-                let prevLineStart = currentLineRange.location - 1
-                let prevLineRange = nsString.lineRange(for: NSRange(location: prevLineStart, length: 0))
-                currentLineRange = NSUnionRange(currentLineRange, prevLineRange)
-            }
-        default:
-            break
-        }
-
-        // Calculate selection from anchor
-        let anchorLineRange = nsString.lineRange(for: NSRange(location: visualAnchor, length: 0))
-        let start = min(anchorLineRange.location, currentLineRange.location)
-        let end = max(anchorLineRange.upperBound, currentLineRange.upperBound)
-        setSelectedRange(NSRange(location: start, length: end - start))
-    }
-
-    private func yankVisualLineSelection() {
-        let range = selectedRange()
-        guard range.length > 0, let storage = textStorage else { return }
-        let nsString = storage.string as NSString
-        let text = nsString.substring(with: range)
-        copyToPasteboard(text)
-        enterNormalMode()
-        let lineStart = nsString.lineRange(for: NSRange(location: range.location, length: 0)).location
-        setSelectedRange(NSRange(location: lineStart, length: 0))
-    }
-
-    private func deleteVisualLineSelection() {
-        let range = selectedRange()
-        guard range.length > 0 else { return }
-        if shouldChangeText(in: range, replacementString: "") {
-            textStorage?.replaceCharacters(in: range, with: "")
-            didChangeText()
-            enterNormalMode()
-            setSelectedRange(NSRange(location: range.location, length: 0))
-        }
-    }
-    // MARK: - Command Mode Helpers
-
-    private func initializeStatusBar() {
-        // Lazily create the views once
-        if statusBarView == nil {
-            print("[VimMode] Creating new status bar view")
-            let statusBar = NSView()
-            statusBar.wantsLayer = true
-            statusBar.layer?.backgroundColor = NSColor.gray.withAlphaComponent(0.3).cgColor
-            statusBarView = statusBar
-
-            let label = NSTextField()
-            label.isBordered = false
-            label.isBezeled = false
-            label.drawsBackground = false
-            label.isEditable = false
-            label.isSelectable = false
-            label.textColor = EditTextView.fontColor
-            label.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-            label.stringValue = "NORMAL"
-            statusBar.addSubview(label)
-            statusBarLabel = label
-        }
-
-        // Attach to layout once the window is ready
-        guard let statusBar = statusBarView else {
-            print("[VimMode] statusBarView is nil, returning")
-            return
-        }
-
-        // Try to find a suitable parent view
-        guard let targetView = window?.contentView else {
-            print("[VimMode] window.contentView is nil, retrying later...")
-            // Only retry a limited number of times via viewDidMoveToWindow
-            return
-        }
-
-        print("[VimMode] Found window.contentView: \(targetView)")
-
-        if statusBar.superview == nil {
-            print("[VimMode] Adding status bar to window.contentView")
-            targetView.addSubview(statusBar)
-            constrainStatusBar(statusBar)
-            print("[VimMode] Status bar added and constrained")
-        } else {
-            print("[VimMode] Status bar already has superview: \(String(describing: statusBar.superview))")
-        }
-    }
-
-    private func constrainStatusBar(_ statusBar: NSView) {
-        guard let targetView = window?.contentView else { return }
-        statusBar.translatesAutoresizingMaskIntoConstraints = false
-
-        NSLayoutConstraint.activate([
-            statusBar.leadingAnchor.constraint(equalTo: targetView.leadingAnchor),
-            statusBar.trailingAnchor.constraint(equalTo: targetView.trailingAnchor),
-            statusBar.bottomAnchor.constraint(equalTo: targetView.bottomAnchor),
-            statusBar.heightAnchor.constraint(equalToConstant: 24),
-        ])
-
-        // Position label in status bar
-        if let label = statusBarLabel {
-            label.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                label.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor, constant: 8),
-                label.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
-            ])
-        }
-    }
-
-    private func updateStatusBar() {
-        var modeText = ""
-        switch editorMode {
-        case .insert:
-            modeText = "INSERT"
-        case .normal:
-            modeText = "NORMAL"
-        case .visual:
-            modeText = "VISUAL"
-        case .visualLine:
-            modeText = "VISUAL LINE"
-        case .command:
-            modeText = ":\(commandBuffer)"
-        }
-        print("[VimMode] updateStatusBar: \(modeText), label: \(String(describing: statusBarLabel)), superview: \(String(describing: statusBarView?.superview))")
-        statusBarLabel?.stringValue = modeText
-    }
-
-    private func executeCommand(_ command: String) {
-        print("[VimMode] executeCommand: \(command)")
-        let trimmedCmd = command.trimmingCharacters(in: .whitespaces).lowercased()
-
-        switch trimmedCmd {
-        case "w":
-            // Save file
-            if let note = EditTextView.note {
-                saveTextStorageContent(to: note)
-                note.save()
-                EditTextView.shouldForceRescan = true
-            }
-        case "wq", "x":
-            // Save and quit
-            if let note = EditTextView.note {
-                saveTextStorageContent(to: note)
-                note.save()
-                EditTextView.shouldForceRescan = true
-            }
-            window?.close()
-        case "q":
-            // Quit without saving
-            window?.close()
-        default:
-            NSSound.beep()
-        }
+    func vimCloseWindow() {
+        window?.close()
     }
 }

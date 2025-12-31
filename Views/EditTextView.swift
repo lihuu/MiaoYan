@@ -42,7 +42,7 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
     nonisolated(unsafe) private weak var cachedViewController: ViewController?
     var isHighlighted: Bool = false
     let storage = Storage.sharedInstance()
-    let caretWidth: CGFloat = 1
+    private var caretWidth: CGFloat = 1
     var initRange = NSRange(location: 0, length: 0)
     public var timer: Timer?
     public var markdownView: MPreviewView?
@@ -67,8 +67,27 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
     }
     // Tracks whether the last ESC key press was consumed by the IME
     private var shouldIgnoreEscapeNavigation = false
+    // Track ESC used for vim mode to skip focus changes in keyUp
+    private var didConsumeEscapeForVim = false
     // Debounce appearance changes to avoid flashing
     private var lastAppearanceChangeTime: TimeInterval = 0
+
+    private enum EditorMode {
+        case insert
+        case normal
+    }
+
+    private enum PendingOperator {
+        case none
+        case delete
+        case yank
+        case change
+    }
+
+    private var editorMode: EditorMode = .normal
+    private var pendingOperator: PendingOperator = .none
+    private var pendingG: Bool = false
+    private var pendingR: Character? = nil
     override var textContainerOrigin: NSPoint {
         var origin = super.textContainerOrigin
         if bottomPadding > 0 {
@@ -89,6 +108,7 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             defaultVerticalInset = textContainerInset.height
             hasCapturedDefaultVerticalInset = true
             bottomPadding = 0
+            updateCaretStyle()
         }
     }
 
@@ -114,6 +134,14 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
         newRect.size.height -= diff
         newRect.origin.y += 4.0
         super.drawInsertionPoint(in: newRect, color: EditTextView.fontColor, turnedOn: flag)
+    }
+
+    override func insertText(_ insertString: Any) {
+        guard editorMode == .insert else {
+            NSSound.beep()
+            return
+        }
+        super.insertText(insertString)
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -578,6 +606,46 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
         }
         restoreCursorPosition(needScrollToCursor: options.needScrollToCursor)
     }
+
+    // MARK: - Vim Mode Helpers
+
+    private func enterInsertMode() {
+        editorMode = .insert
+        pendingOperator = .none
+        updateCaretStyle()
+    }
+
+    private func enterNormalMode() {
+        editorMode = .normal
+        pendingOperator = .none
+        updateCaretStyle()
+    }
+
+    private func updateCaretStyle() {
+        let blockWidth = blockCaretWidth()
+        caretWidth = editorMode == .normal ? blockWidth : 1
+        setNeedsDisplay(bounds)
+    }
+
+    private func blockCaretWidth() -> CGFloat {
+        // Prefer current typing attributes; fall back to storage font near the caret; finally default note font.
+        if let attrFont = typingAttributes[.font] as? NSFont {
+            let width = "W".size(withAttributes: [.font: attrFont]).width
+            return max(6, min(18, width))
+        }
+
+        if let storage = textStorage, storage.length > 0 {
+            let safeIndex = max(0, min(selectedRange().location, storage.length - 1))
+            if let storageFont = storage.attribute(.font, at: safeIndex, effectiveRange: nil) as? NSFont {
+                let width = "W".size(withAttributes: [.font: storageFont]).width
+                return max(6, min(18, width))
+            }
+        }
+
+        let fallbackFont = UserDefaultsManagement.noteFont
+        let width = "W".size(withAttributes: [.font: fallbackFont]).width
+        return max(6, min(18, width))
+    }
     public func clear() {
         hideSearchBar()
         splitViewUpdateTimer?.invalidate()
@@ -593,6 +661,7 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             viewController.updateTitle(newTitle: "")
         }
         EditTextView.note = nil
+        enterNormalMode()
     }
 
     // MARK: - Editor Utility Helpers
@@ -1033,6 +1102,226 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
 
     override func keyDown(with event: NSEvent) {
         imagePreviewManager?.hideImagePreview()
+
+        if editorMode == .normal,
+            event.modifierFlags.intersection([.command, .option, .control]).isEmpty,
+            let chars = event.charactersIgnoringModifiers
+        {
+            let key = chars.lowercased()
+            let isShiftPressed = event.modifierFlags.contains(.shift)
+
+            switch key {
+            // Basic movement
+            case "h":
+                moveLeft(self)
+                return
+            case "j":
+                moveDown(self)
+                return
+            case "k":
+                moveUp(self)
+                return
+            case "l":
+                moveRight(self)
+                return
+
+            // Line movement
+            case "0":
+                moveToBeginningOfLine(self)
+                return
+            case "$":
+                if pendingOperator != .none {
+                    handlePendingOperator(withMotion: "$")
+                    pendingOperator = .none
+                } else {
+                    moveToEndOfLine(self)
+                }
+                return
+            case "^":
+                if pendingOperator != .none {
+                    handlePendingOperator(withMotion: "^")
+                    pendingOperator = .none
+                } else {
+                    moveToBeginningOfLineNonWhitespace()
+                }
+                return
+
+            // Word movement
+            case "w":
+                if isShiftPressed {
+                    // W - WORD forward
+                    if pendingOperator != .none {
+                        handlePendingOperator(withMotion: "W")
+                        pendingOperator = .none
+                    } else {
+                        moveWordForward(bigWord: true)
+                    }
+                } else {
+                    // w - word forward
+                    if pendingOperator != .none {
+                        handlePendingOperator(withMotion: "w")
+                        pendingOperator = .none
+                    } else {
+                        moveWordForward(bigWord: false)
+                    }
+                }
+                return
+            case "b":
+                if isShiftPressed {
+                    // B - WORD backward
+                    if pendingOperator != .none {
+                        handlePendingOperator(withMotion: "B")
+                        pendingOperator = .none
+                    } else {
+                        moveWordBackward(bigWord: true)
+                    }
+                } else {
+                    // b - word backward
+                    if pendingOperator != .none {
+                        handlePendingOperator(withMotion: "b")
+                        pendingOperator = .none
+                    } else {
+                        moveWordBackward(bigWord: false)
+                    }
+                }
+                return
+
+            // File movement
+            case "g":
+                if isShiftPressed {
+                    // G - go to end of file
+                    moveToEndOfDocument(self)
+                } else {
+                    // g - needs another g to go to beginning
+                    if pendingG {
+                        moveToBeginningOfDocument(self)
+                        pendingG = false
+                    } else {
+                        pendingG = true
+                        // Set a timer to reset pendingG after a short delay
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                            self?.pendingG = false
+                        }
+                    }
+                }
+                return
+
+            // Enter insert mode
+            case "i":
+                if isShiftPressed {
+                    // I - insert at beginning of line
+                    moveToBeginningOfLineNonWhitespace()
+                    enterInsertMode()
+                } else {
+                    // i - insert at cursor
+                    enterInsertMode()
+                }
+                return
+            case "a":
+                if isShiftPressed {
+                    // A - append at end of line
+                    moveToEndOfLine(self)
+                    enterInsertMode()
+                } else {
+                    // a - append after cursor
+                    moveRight(self)
+                    enterInsertMode()
+                }
+                return
+            case "o":
+                if isShiftPressed {
+                    // O - insert line above
+                    insertLineAbove()
+                } else {
+                    // o - insert line below
+                    insertLineBelow()
+                }
+                return
+
+            // Delete operations
+            case "x":
+                deleteCharacterAtCursor()
+                return
+            case "d":
+                if isShiftPressed {
+                    // D - delete to end of line
+                    deleteToEndOfLine()
+                } else {
+                    // d - delete operator
+                    if pendingOperator == .delete {
+                        deleteCurrentLine()
+                        pendingOperator = .none
+                    } else {
+                        pendingOperator = .delete
+                    }
+                }
+                return
+
+            // Yank operations
+            case "y":
+                if pendingOperator == .yank {
+                    yankCurrentLine()
+                    pendingOperator = .none
+                } else {
+                    pendingOperator = .yank
+                }
+                return
+
+            // Change operations
+            case "c":
+                if isShiftPressed {
+                    // C - change to end of line
+                    changeToEndOfLine()
+                } else {
+                    // c - change operator
+                    if pendingOperator == .change {
+                        changeCurrentLine()
+                        pendingOperator = .none
+                    } else {
+                        pendingOperator = .change
+                    }
+                }
+                return
+
+            // Paste
+            case "p":
+                if isShiftPressed {
+                    // P - paste before cursor
+                    pasteBeforeCursor()
+                } else {
+                    // p - paste after cursor
+                    pasteAfterCursor()
+                }
+                return
+
+            // Replace
+            case "r":
+                // Wait for next character to replace
+                pendingR = " "  // placeholder
+                return
+
+            // Undo
+            case "u":
+                undoManager?.undo()
+                return
+
+            default:
+                // Handle replace character
+                if pendingR != nil, let char = event.charactersIgnoringModifiers?.first {
+                    replaceCharacterAtCursor(with: char)
+                    pendingR = nil
+                    return
+                }
+
+                if pendingOperator != .none {
+                    NSSound.beep()
+                    pendingOperator = .none
+                    return
+                }
+                break
+            }
+        }
+
         guard
             !(event.modifierFlags.contains(.shift)
                 && [
@@ -1056,12 +1345,19 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
 
             if isSearchBarVisible {
                 hideSearchBar()
+                enterNormalMode()
+                didConsumeEscapeForVim = true
                 return
             }
             if markdownView?.isSearchBarVisible == true {
                 markdownView?.hideSearchBar()
+                enterNormalMode()
+                didConsumeEscapeForVim = true
                 return
             }
+            enterNormalMode()
+            didConsumeEscapeForVim = true
+            return
         }
 
         guard let note = EditTextView.note else { return }
@@ -1193,6 +1489,11 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             if shouldIgnoreEscapeNavigation {
                 shouldIgnoreEscapeNavigation = false
                 super.keyUp(with: event)
+                return
+            }
+
+            if didConsumeEscapeForVim {
+                didConsumeEscapeForVim = false
                 return
             }
 
@@ -1621,5 +1922,436 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
         // Trigger layout update and change notification
         layoutManager?.ensureLayout(for: textContainer!)
         didChangeText()
+    }
+
+    // MARK: - Vim Normal Mode Helpers
+
+    private func deleteCharacterAtCursor() {
+        guard let storage = textStorage else { return }
+        let cursor = selectedRange().location
+        guard cursor < storage.length else { return }
+        let range = NSRange(location: cursor, length: 1)
+        if shouldChangeText(in: range, replacementString: "") {
+            storage.replaceCharacters(in: range, with: "")
+            didChangeText()
+            setSelectedRange(NSRange(location: min(cursor, storage.length), length: 0))
+        }
+    }
+
+    private func deleteCurrentLine() {
+        guard let storage = textStorage else { return }
+        let nsString = storage.string as NSString
+        let cursor = selectedRange().location
+        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+        if shouldChangeText(in: lineRange, replacementString: "") {
+            storage.replaceCharacters(in: lineRange, with: "")
+            didChangeText()
+            let newLocation = min(lineRange.location, storage.length)
+            setSelectedRange(NSRange(location: newLocation, length: 0))
+        }
+    }
+
+    private func yankCurrentLine() {
+        guard let storage = textStorage else { return }
+        let nsString = storage.string as NSString
+        let cursor = selectedRange().location
+        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+        let text = nsString.substring(with: lineRange)
+        copyToPasteboard(text)
+    }
+
+    private func handlePendingOperator(withMotion motion: String) {
+        guard let range = motionRange(for: motion) else {
+            NSSound.beep()
+            return
+        }
+
+        switch pendingOperator {
+        case .delete:
+            applyDelete(range: range)
+        case .yank:
+            applyYank(range: range)
+        case .change:
+            applyChange(range: range)
+        case .none:
+            break
+        }
+    }
+
+    private func applyChange(range: NSRange) {
+        guard let storage = textStorage, range.length > 0 else { return }
+        if shouldChangeText(in: range, replacementString: "") {
+            storage.replaceCharacters(in: range, with: "")
+            didChangeText()
+            setSelectedRange(NSRange(location: range.location, length: 0))
+            enterInsertMode()
+        }
+    }
+
+    private func motionRange(for motion: String) -> NSRange? {
+        guard let storage = textStorage else { return nil }
+        let nsString = storage.string as NSString
+        let cursor = selectedRange().location
+        let length = nsString.length
+        guard cursor <= length else { return nil }
+
+        switch motion {
+        case "w":
+            let target = nextWordBoundary(from: cursor, bigWord: false)
+            return target > cursor ? NSRange(location: cursor, length: target - cursor) : nil
+        case "W":
+            let target = nextWordBoundary(from: cursor, bigWord: true)
+            return target > cursor ? NSRange(location: cursor, length: target - cursor) : nil
+        case "b":
+            let target = previousWordBoundary(from: cursor, bigWord: false)
+            return target < cursor ? NSRange(location: target, length: cursor - target) : nil
+        case "B":
+            let target = previousWordBoundary(from: cursor, bigWord: true)
+            return target < cursor ? NSRange(location: target, length: cursor - target) : nil
+        case "$":
+            let lineRange = nsString.lineRange(for: NSRange(location: min(cursor, max(length - 1, 0)), length: 0))
+            var end = lineRange.upperBound
+            if end > lineRange.location {
+                let ch = nsString.character(at: end - 1)
+                if ch == 0x0A || ch == 0x0D {  // \n or \r
+                    end -= 1
+                }
+            }
+            return end > cursor ? NSRange(location: cursor, length: end - cursor) : nil
+        case "^":
+            let lineRange = nsString.lineRange(for: NSRange(location: min(cursor, max(length - 1, 0)), length: 0))
+            let start = firstNonSpace(in: nsString, range: lineRange)
+            return start < cursor ? NSRange(location: start, length: cursor - start) : nil
+        default:
+            return nil
+        }
+    }
+
+    private func previousWordBoundary(from index: Int, bigWord: Bool) -> Int {
+        guard let storage = textStorage else { return index }
+        let nsString = storage.string as NSString
+        guard index > 0 else { return 0 }
+
+        var i = index - 1
+
+        func isWordChar(_ c: unichar) -> Bool {
+            if bigWord {
+                return c != 0x20 && c != 0x09 && c != 0x0A && c != 0x0D
+            }
+            if let scalar = Unicode.Scalar(c) {
+                return CharacterSet.alphanumerics.contains(scalar) || c == 95
+            }
+            return false
+        }
+
+        // Skip whitespace
+        while i > 0 {
+            let ch = nsString.character(at: i)
+            if ch != 0x20 && ch != 0x09 && ch != 0x0A && ch != 0x0D {
+                break
+            }
+            i -= 1
+        }
+
+        // Move to beginning of word
+        let targetIsWord = isWordChar(nsString.character(at: i))
+        while i > 0 {
+            let ch = nsString.character(at: i - 1)
+            if isWordChar(ch) != targetIsWord {
+                break
+            }
+            i -= 1
+        }
+
+        return i
+    }
+
+    private func nextWordBoundary(from index: Int, bigWord: Bool) -> Int {
+        guard let storage = textStorage else { return index }
+        let nsString = storage.string as NSString
+        let length = nsString.length
+        var i = index
+        guard i < length else { return length }
+
+        func isWordChar(_ c: unichar) -> Bool {
+            if bigWord {
+                return c != 0x20 && c != 0x09 && c != 0x0A && c != 0x0D  // not space, tab, newline, carriage return
+            }
+            if let scalar = Unicode.Scalar(c) {
+                return CharacterSet.alphanumerics.contains(scalar) || c == 95  // underscore
+            }
+            return false
+        }
+
+        let currentIsWord = isWordChar(nsString.character(at: i))
+        while i < length && isWordChar(nsString.character(at: i)) == currentIsWord {
+            i += 1
+        }
+        while i < length {
+            let ch = nsString.character(at: i)
+            if ch != 0x20 && ch != 0x09 && ch != 0x0A && ch != 0x0D {  // not space, tab, newline, carriage return
+                break
+            }
+            i += 1
+        }
+        return i
+    }
+
+    private func firstNonSpace(in nsString: NSString, range: NSRange) -> Int {
+        let upper = range.location + range.length
+        var i = range.location
+        while i < upper {
+            let ch = nsString.character(at: i)
+            if ch != 0x20 && ch != 0x09 && ch != 0x0A && ch != 0x0D {  // not space, tab, newline, carriage return
+                return i
+            }
+            i += 1
+        }
+        return range.location
+    }
+
+    private func applyDelete(range: NSRange) {
+        guard let storage = textStorage, range.length > 0 else { return }
+        if shouldChangeText(in: range, replacementString: "") {
+            storage.replaceCharacters(in: range, with: "")
+            didChangeText()
+            setSelectedRange(NSRange(location: range.location, length: 0))
+        }
+    }
+
+    private func applyYank(range: NSRange) {
+        guard let storage = textStorage, range.length > 0 else { return }
+        let nsString = storage.string as NSString
+        let text = nsString.substring(with: range)
+        copyToPasteboard(text)
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        let pb = NSPasteboard.general
+        pb.declareTypes([.string], owner: nil)
+        pb.setString(text, forType: .string)
+    }
+
+    // MARK: - Additional Vim Commands
+
+    // Line movement
+    private func moveToBeginningOfLineNonWhitespace() {
+        guard let storage = textStorage else { return }
+        let nsString = storage.string as NSString
+        let cursor = selectedRange().location
+        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+        let start = firstNonSpace(in: nsString, range: lineRange)
+        setSelectedRange(NSRange(location: start, length: 0))
+    }
+
+    // Word movement
+    private func moveWordForward(bigWord: Bool) {
+        guard let storage = textStorage else { return }
+        let cursor = selectedRange().location
+        let target = nextWordBoundary(from: cursor, bigWord: bigWord)
+        setSelectedRange(NSRange(location: target, length: 0))
+    }
+
+    private func moveWordBackward(bigWord: Bool) {
+        guard let storage = textStorage else { return }
+        let nsString = storage.string as NSString
+        let cursor = selectedRange().location
+        guard cursor > 0 else { return }
+
+        var i = cursor - 1
+
+        func isWordChar(_ c: unichar) -> Bool {
+            if bigWord {
+                return c != 0x20 && c != 0x09 && c != 0x0A && c != 0x0D
+            }
+            if let scalar = Unicode.Scalar(c) {
+                return CharacterSet.alphanumerics.contains(scalar) || c == 95
+            }
+            return false
+        }
+
+        // Skip whitespace
+        while i > 0 {
+            let ch = nsString.character(at: i)
+            if ch != 0x20 && ch != 0x09 && ch != 0x0A && ch != 0x0D {
+                break
+            }
+            i -= 1
+        }
+
+        // Move to beginning of word
+        let targetIsWord = isWordChar(nsString.character(at: i))
+        while i > 0 {
+            let ch = nsString.character(at: i - 1)
+            if isWordChar(ch) != targetIsWord {
+                break
+            }
+            i -= 1
+        }
+
+        setSelectedRange(NSRange(location: i, length: 0))
+    }
+
+    // Insert lines
+    private func insertLineBelow() {
+        guard let storage = textStorage else { return }
+        let nsString = storage.string as NSString
+        let cursor = selectedRange().location
+        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+        let insertPos = lineRange.upperBound
+
+        let newLine = "\n"
+        let range = NSRange(location: insertPos, length: 0)
+        if shouldChangeText(in: range, replacementString: newLine) {
+            storage.replaceCharacters(in: range, with: newLine)
+            didChangeText()
+            setSelectedRange(NSRange(location: insertPos + 1, length: 0))
+            enterInsertMode()
+        }
+    }
+
+    private func insertLineAbove() {
+        guard let storage = textStorage else { return }
+        let nsString = storage.string as NSString
+        let cursor = selectedRange().location
+        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+        let insertPos = lineRange.location
+
+        let newLine = "\n"
+        let range = NSRange(location: insertPos, length: 0)
+        if shouldChangeText(in: range, replacementString: newLine) {
+            storage.replaceCharacters(in: range, with: newLine)
+            didChangeText()
+            setSelectedRange(NSRange(location: insertPos, length: 0))
+            enterInsertMode()
+        }
+    }
+
+    // Delete operations
+    private func deleteToEndOfLine() {
+        guard let storage = textStorage else { return }
+        let nsString = storage.string as NSString
+        let cursor = selectedRange().location
+        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+        var end = lineRange.upperBound
+        if end > lineRange.location {
+            let ch = nsString.character(at: end - 1)
+            if ch == 0x0A || ch == 0x0D {
+                end -= 1
+            }
+        }
+
+        if end > cursor {
+            let range = NSRange(location: cursor, length: end - cursor)
+            if shouldChangeText(in: range, replacementString: "") {
+                storage.replaceCharacters(in: range, with: "")
+                didChangeText()
+                setSelectedRange(NSRange(location: cursor, length: 0))
+            }
+        }
+    }
+
+    // Change operations
+    private func changeCurrentLine() {
+        guard let storage = textStorage else { return }
+        let nsString = storage.string as NSString
+        let cursor = selectedRange().location
+        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+
+        // Find indent
+        var indent = ""
+        var i = lineRange.location
+        let upper = lineRange.location + lineRange.length
+        while i < upper {
+            let ch = nsString.character(at: i)
+            if ch == 0x20 || ch == 0x09 {
+                indent.append(Character(UnicodeScalar(ch)!))
+                i += 1
+            } else {
+                break
+            }
+        }
+
+        let replacement = indent + "\n"
+        if shouldChangeText(in: lineRange, replacementString: replacement) {
+            storage.replaceCharacters(in: lineRange, with: replacement)
+            didChangeText()
+            setSelectedRange(NSRange(location: lineRange.location + indent.count, length: 0))
+            enterInsertMode()
+        }
+    }
+
+    private func changeToEndOfLine() {
+        deleteToEndOfLine()
+        enterInsertMode()
+    }
+
+    // Paste operations
+    private func pasteAfterCursor() {
+        let pb = NSPasteboard.general
+        guard let text = pb.string(forType: .string), !text.isEmpty else { return }
+        guard let storage = textStorage else { return }
+
+        var cursor = selectedRange().location
+
+        // If text ends with newline, it's a line paste
+        if text.hasSuffix("\n") {
+            let nsString = storage.string as NSString
+            let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+            cursor = lineRange.upperBound
+        } else {
+            // Move one character right for character paste
+            cursor = min(cursor + 1, storage.length)
+        }
+
+        let range = NSRange(location: cursor, length: 0)
+        if shouldChangeText(in: range, replacementString: text) {
+            storage.replaceCharacters(in: range, with: text)
+            didChangeText()
+
+            // Position cursor at end of pasted text (minus trailing newline if present)
+            let newPos = text.hasSuffix("\n") ? cursor + text.count - 1 : cursor + text.count - 1
+            setSelectedRange(NSRange(location: max(cursor, min(newPos, storage.length - 1)), length: 0))
+        }
+    }
+
+    private func pasteBeforeCursor() {
+        let pb = NSPasteboard.general
+        guard let text = pb.string(forType: .string), !text.isEmpty else { return }
+        guard let storage = textStorage else { return }
+
+        var cursor = selectedRange().location
+
+        // If text ends with newline, it's a line paste
+        if text.hasSuffix("\n") {
+            let nsString = storage.string as NSString
+            let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+            cursor = lineRange.location
+        }
+
+        let range = NSRange(location: cursor, length: 0)
+        if shouldChangeText(in: range, replacementString: text) {
+            storage.replaceCharacters(in: range, with: text)
+            didChangeText()
+
+            // Position cursor at end of pasted text (minus trailing newline if present)
+            let newPos = text.hasSuffix("\n") ? cursor + text.count - 1 : cursor + text.count - 1
+            setSelectedRange(NSRange(location: max(cursor, min(newPos, storage.length - 1)), length: 0))
+        }
+    }
+
+    // Replace character
+    private func replaceCharacterAtCursor(with char: Character) {
+        guard let storage = textStorage else { return }
+        let cursor = selectedRange().location
+        guard cursor < storage.length else { return }
+
+        let replacement = String(char)
+        let range = NSRange(location: cursor, length: 1)
+        if shouldChangeText(in: range, replacementString: replacement) {
+            storage.replaceCharacters(in: range, with: replacement)
+            didChangeText()
+            setSelectedRange(NSRange(location: cursor, length: 0))
+        }
     }
 }

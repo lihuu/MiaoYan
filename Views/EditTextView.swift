@@ -2677,7 +2677,7 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             print("[VimMode] statusBarView is nil, returning")
             return
         }
-        
+
         // Try to find a suitable parent view
         guard let targetView = window?.contentView else {
             print("[VimMode] window.contentView is nil, retrying later...")

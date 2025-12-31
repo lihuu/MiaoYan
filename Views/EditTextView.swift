@@ -482,6 +482,30 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
         }
     }
 
+    /// Insert current timestamp in format: yyyy-MM-dd HH:mm:ss
+    private func insertCurrentTimestamp() {
+        guard EditTextView.note != nil else { return }
+        window?.makeFirstResponder(self)
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let timestamp = formatter.string(from: Date())
+
+        let range = selectedRange()
+
+        if shouldChangeText(in: range, replacementString: timestamp) {
+            let attributes = typingAttributes
+            let attributedText = NSAttributedString(string: timestamp, attributes: attributes)
+
+            textStorage?.replaceCharacters(in: range, with: attributedText)
+            didChangeText()
+
+            // Place cursor after the inserted timestamp
+            let newPosition = range.location + timestamp.count
+            setSelectedRange(NSRange(location: newPosition, length: 0))
+        }
+    }
+
     func getSelectedNote() -> Note? {
         return getViewController()?.notesTableView.getSelectedNote()
     }
@@ -1324,6 +1348,12 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
         // Cmd+Option+C: Insert code block
         if commandPressed, optionPressed, !controlPressed, characters.lowercased() == "c" {
             insertCodeBlock()
+            return true
+        }
+
+        // Cmd+Option+T: Insert current timestamp
+        if commandPressed, optionPressed, !controlPressed, characters.lowercased() == "t" {
+            insertCurrentTimestamp()
             return true
         }
 

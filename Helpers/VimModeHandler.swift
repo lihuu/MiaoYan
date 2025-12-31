@@ -76,6 +76,16 @@ class VimModeHandler {
     private var visualAnchor: Int = 0
     private var commandBuffer: String = ""
 
+    // Count prefix for commands (e.g., 5j means move down 5 lines)
+    private var countPrefix: Int = 0
+
+    // Accelerated key repeat for j/k
+    private var lastJKKeyTime: Date?
+    private var jkRepeatCount: Int = 0
+    private let jkAccelerationThreshold: TimeInterval = 0.15  // Time between key presses to consider as repeat
+    private let jkBaseAcceleration: Int = 1  // Base movement
+    private let jkMaxAcceleration: Int = 5  // Maximum acceleration multiplier
+
     // Status bar
     private var statusBarView: NSView?
     private var statusBarLabel: NSTextField?
@@ -97,18 +107,24 @@ class VimModeHandler {
     func enterInsertMode() {
         editorMode = .insert
         pendingOperator = .none
+        countPrefix = 0
+        resetAcceleration()
         updateCaretStyle()
     }
 
     func enterNormalMode() {
         editorMode = .normal
         pendingOperator = .none
+        countPrefix = 0
+        resetAcceleration()
         updateCaretStyle()
     }
 
     func enterVisualMode() {
         editorMode = .visual
         visualAnchor = delegate?.vimSelectedRange.location ?? 0
+        countPrefix = 0
+        resetAcceleration()
         updateCaretStyle()
     }
 
@@ -120,12 +136,16 @@ class VimModeHandler {
         let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
         visualAnchor = lineRange.location
         delegate?.vimSetSelectedRange(lineRange)
+        countPrefix = 0
+        resetAcceleration()
         updateCaretStyle()
     }
 
     func enterCommandMode() {
         editorMode = .command
         commandBuffer = ""
+        countPrefix = 0
+        resetAcceleration()
         updateCaretStyle()
     }
 
@@ -160,6 +180,43 @@ class VimModeHandler {
         let fallbackFont = UserDefaultsManagement.noteFont
         let width = "W".size(withAttributes: [.font: fallbackFont]).width
         return max(6, min(18, width))
+    }
+
+    // MARK: - Accelerated Movement
+
+    /// Calculate accelerated move count for j/k keys when held down
+    private func calculateAcceleratedMove(baseCount: Int, forKey key: String) -> Int {
+        let now = Date()
+
+        // Check if this is a rapid key repeat
+        if let lastTime = lastJKKeyTime {
+            let timeSinceLastPress = now.timeIntervalSince(lastTime)
+
+            if timeSinceLastPress < jkAccelerationThreshold {
+                // This is a repeat, increase acceleration
+                jkRepeatCount += 1
+            } else {
+                // Too much time passed, reset acceleration
+                jkRepeatCount = 0
+            }
+        } else {
+            jkRepeatCount = 0
+        }
+
+        lastJKKeyTime = now
+
+        // Calculate acceleration multiplier based on repeat count
+        // Ramp up: 1, 1, 2, 2, 3, 3, 4, 4, 5, 5...
+        let accelerationLevel = min(jkRepeatCount / 2, jkMaxAcceleration - jkBaseAcceleration)
+        let accelerationMultiplier = jkBaseAcceleration + accelerationLevel
+
+        return baseCount * accelerationMultiplier
+    }
+
+    /// Reset acceleration state (call when switching modes or other operations)
+    private func resetAcceleration() {
+        lastJKKeyTime = nil
+        jkRepeatCount = 0
     }
 
     // MARK: - Key Handling
@@ -267,25 +324,63 @@ class VimModeHandler {
         let key = chars.lowercased()
         let originalKey = chars
 
+        // Handle digit keys for count prefix (1-9 start count, 0 can continue count or move to beginning)
+        if let digit = Int(key), digit >= 1 && digit <= 9 {
+            countPrefix = countPrefix * 10 + digit
+            updateStatusBar()
+            return true
+        }
+
+        // Special handling for 0: if we have a count prefix, it's part of the number; otherwise it's move to beginning
+        if key == "0" {
+            if countPrefix > 0 {
+                countPrefix = countPrefix * 10
+                updateStatusBar()
+                return true
+            } else {
+                delegate?.vimMoveToBeginningOfLine()
+                return true
+            }
+        }
+
+        // Get the effective count (use countPrefix if set, otherwise 1)
+        let count = countPrefix > 0 ? countPrefix : 1
+
+        // Reset count prefix after using it (will be reset at end of switch for commands that use it)
+        defer {
+            // Reset count prefix after command execution (except for incomplete commands)
+            if pendingOperator == .none && !pendingG {
+                countPrefix = 0
+                updateStatusBar()
+            }
+        }
+
         switch key {
         // Basic movement
         case "h":
-            delegate?.vimMoveLeft()
+            for _ in 0..<count {
+                delegate?.vimMoveLeft()
+            }
             return true
         case "j":
-            delegate?.vimMoveDown()
+            let moveCount = calculateAcceleratedMove(baseCount: count, forKey: "j")
+            for _ in 0..<moveCount {
+                delegate?.vimMoveDown()
+            }
             return true
         case "k":
-            delegate?.vimMoveUp()
+            let moveCount = calculateAcceleratedMove(baseCount: count, forKey: "k")
+            for _ in 0..<moveCount {
+                delegate?.vimMoveUp()
+            }
             return true
         case "l":
-            delegate?.vimMoveRight()
+            for _ in 0..<count {
+                delegate?.vimMoveRight()
+            }
             return true
 
-        // Line movement
-        case "0":
-            delegate?.vimMoveToBeginningOfLine()
-            return true
+        // Line movement (0 handled above)
         case "$":
             if pendingOperator != .none {
                 handlePendingOperator(withMotion: "$")
@@ -546,7 +641,12 @@ class VimModeHandler {
             modeText = "INSERT"
             modeColor = NSColor.systemGreen
         case .normal:
-            modeText = "NORMAL"
+            // Show count prefix if any
+            if countPrefix > 0 {
+                modeText = "NORMAL \(countPrefix)"
+            } else {
+                modeText = "NORMAL"
+            }
             modeColor = NSColor.systemBlue
         case .visual:
             modeText = "VISUAL"

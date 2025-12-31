@@ -86,6 +86,16 @@ class VimModeHandler {
     private let jkBaseAcceleration: Int = 1  // Base movement
     private let jkMaxAcceleration: Int = 5  // Maximum acceleration multiplier
 
+    // f/F/t/T character search
+    private var pendingF: Bool = false  // Waiting for character after f
+    private var pendingFReverse: Bool = false  // Waiting for character after F
+    private var lastFChar: Character? = nil  // Last searched character for ; and ,
+    private var lastFWasForward: Bool = true  // Direction of last f/F search
+
+    // Search state for / ? * #
+    private var searchPattern: String = ""
+    private var searchForward: Bool = true  // true for / and *, false for ? and #
+
     // Status bar
     private var statusBarView: NSView?
     private var statusBarLabel: NSTextField?
@@ -226,18 +236,34 @@ class VimModeHandler {
     func handleCommandModeKey(keyCode: UInt16, characters: String?) -> Bool {
         guard editorMode == .command, let chars = characters else { return false }
 
+        // Check if we're in search mode (command starts with / or ?)
+        let isSearchMode = commandBuffer.hasPrefix("/") || commandBuffer.hasPrefix("?")
+
         // Backspace/Delete to remove last character
         if keyCode == 51 || keyCode == 117 {  // kVK_Delete or kVK_ForwardDelete
-            if !commandBuffer.isEmpty {
+            if commandBuffer.count > 1 {
                 commandBuffer.removeLast()
                 updateStatusBar()
+            } else if commandBuffer.count == 1 {
+                // If only / or ? or : left, cancel
+                commandBuffer = ""
+                enterNormalMode()
             }
             return true
         }
 
         // Enter to execute command
         if keyCode == 36 {  // kVK_Return
-            executeCommand(commandBuffer)
+            if isSearchMode {
+                // Execute search
+                let pattern = String(commandBuffer.dropFirst())  // Remove / or ?
+                if !pattern.isEmpty {
+                    searchPattern = pattern
+                    findNextSearchResult(forward: true)
+                }
+            } else {
+                executeCommand(commandBuffer)
+            }
             commandBuffer = ""
             enterNormalMode()
             return true
@@ -250,11 +276,23 @@ class VimModeHandler {
             return true
         }
 
-        // Add character to command buffer (letters and numbers)
-        if let char = chars.first, char.isLetter || char.isNumber || char == " " {
-            commandBuffer.append(char)
-            updateStatusBar()
-            return true
+        // Add character to command buffer
+        if let char = chars.first {
+            if isSearchMode {
+                // In search mode, allow any printable character
+                if char.isLetter || char.isNumber || char == " " || char.isPunctuation || char.isSymbol {
+                    commandBuffer.append(char)
+                    updateStatusBar()
+                    return true
+                }
+            } else {
+                // In command mode, only letters and numbers
+                if char.isLetter || char.isNumber || char == " " {
+                    commandBuffer.append(char)
+                    updateStatusBar()
+                    return true
+                }
+            }
         }
 
         return false
@@ -363,9 +401,14 @@ class VimModeHandler {
             }
             return true
         case "j":
-            let moveCount = calculateAcceleratedMove(baseCount: count, forKey: "j")
-            for _ in 0..<moveCount {
-                delegate?.vimMoveDown()
+            if isShiftPressed {
+                // J - Join lines
+                joinLines()
+            } else {
+                let moveCount = calculateAcceleratedMove(baseCount: count, forKey: "j")
+                for _ in 0..<moveCount {
+                    delegate?.vimMoveDown()
+                }
             }
             return true
         case "k":
@@ -551,6 +594,51 @@ class VimModeHandler {
             }
             return true
 
+        // Word end movement
+        case "e":
+            if isShiftPressed {
+                moveToEndOfWord(bigWord: true)
+            } else {
+                moveToEndOfWord(bigWord: false)
+            }
+            return true
+
+        // Find character on line
+        case "f":
+            if isShiftPressed {
+                pendingFReverse = true
+            } else {
+                pendingF = true
+            }
+            return true
+
+        // Search current word
+        case "*":
+            searchCurrentWord(forward: true)
+            return true
+
+        case "#":
+            searchCurrentWord(forward: false)
+            return true
+
+        // Search mode
+        case "/":
+            enterSearchMode(forward: true)
+            return true
+
+        case "?":
+            enterSearchMode(forward: false)
+            return true
+
+        // Next/previous search result
+        case "n":
+            if isShiftPressed {
+                findNextSearchResult(forward: false)
+            } else {
+                findNextSearchResult(forward: true)
+            }
+            return true
+
         // Command mode
         case ":":
             enterCommandMode()
@@ -560,6 +648,18 @@ class VimModeHandler {
             // Check for : with original key (since : requires shift)
             if originalKey == ":" {
                 enterCommandMode()
+                return true
+            }
+
+            // Handle f/F character search
+            if pendingF, let char = chars.first {
+                findCharacterOnLine(char, forward: true)
+                pendingF = false
+                return true
+            }
+            if pendingFReverse, let char = chars.first {
+                findCharacterOnLine(char, forward: false)
+                pendingFReverse = false
                 return true
             }
 
@@ -950,6 +1050,271 @@ class VimModeHandler {
         }
 
         delegate?.vimSetSelectedRange(NSRange(location: i, length: 0))
+    }
+
+    /// Move to end of word (e/E command)
+    private func moveToEndOfWord(bigWord: Bool) {
+        guard let storage = delegate?.vimTextStorage else { return }
+        let nsString = storage.string as NSString
+        let length = nsString.length
+        let cursor = delegate?.vimSelectedRange.location ?? 0
+        guard cursor < length else { return }
+
+        var i = cursor
+
+        func isWordChar(_ c: unichar) -> Bool {
+            if bigWord {
+                return c != 0x20 && c != 0x09 && c != 0x0A && c != 0x0D
+            }
+            if let scalar = Unicode.Scalar(c) {
+                return CharacterSet.alphanumerics.contains(scalar) || c == 95
+            }
+            return false
+        }
+
+        // If currently on a word character, move forward one to start searching
+        if i < length - 1 {
+            i += 1
+        }
+
+        // Skip whitespace
+        while i < length {
+            let ch = nsString.character(at: i)
+            if ch != 0x20 && ch != 0x09 && ch != 0x0A && ch != 0x0D {
+                break
+            }
+            i += 1
+        }
+
+        guard i < length else {
+            delegate?.vimSetSelectedRange(NSRange(location: length - 1, length: 0))
+            return
+        }
+
+        // Move to end of current word
+        let currentIsWord = isWordChar(nsString.character(at: i))
+        while i < length - 1 {
+            let nextCh = nsString.character(at: i + 1)
+            if isWordChar(nextCh) != currentIsWord || nextCh == 0x0A || nextCh == 0x0D {
+                break
+            }
+            i += 1
+        }
+
+        delegate?.vimSetSelectedRange(NSRange(location: i, length: 0))
+    }
+
+    // MARK: - Find Character on Line (f/F)
+
+    /// Find character on current line (f/F command)
+    private func findCharacterOnLine(_ char: Character, forward: Bool) {
+        guard let storage = delegate?.vimTextStorage else { return }
+        let nsString = storage.string as NSString
+        let length = nsString.length
+        let cursor = delegate?.vimSelectedRange.location ?? 0
+        guard cursor < length else { return }
+
+        // Get current line range
+        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+        let lineEnd = lineRange.location + lineRange.length
+
+        // Save for ; and , repeats
+        lastFChar = char
+        lastFWasForward = forward
+
+        let targetChar = char.utf16.first ?? 0
+
+        if forward {
+            // Search forward from cursor+1 to end of line
+            var i = cursor + 1
+            while i < lineEnd {
+                let ch = nsString.character(at: i)
+                if ch == 0x0A || ch == 0x0D {
+                    break
+                }
+                if ch == targetChar {
+                    delegate?.vimSetSelectedRange(NSRange(location: i, length: 0))
+                    return
+                }
+                i += 1
+            }
+        } else {
+            // Search backward from cursor-1 to start of line
+            var i = cursor - 1
+            while i >= lineRange.location {
+                let ch = nsString.character(at: i)
+                if ch == targetChar {
+                    delegate?.vimSetSelectedRange(NSRange(location: i, length: 0))
+                    return
+                }
+                i -= 1
+            }
+        }
+
+        // Character not found
+        NSSound.beep()
+    }
+
+    // MARK: - Search Operations
+
+    /// Search for current word under cursor (* and # commands)
+    private func searchCurrentWord(forward: Bool) {
+        guard let storage = delegate?.vimTextStorage else { return }
+        let nsString = storage.string as NSString
+        let length = nsString.length
+        let cursor = delegate?.vimSelectedRange.location ?? 0
+        guard cursor < length else { return }
+
+        // Find word boundaries around cursor
+        func isWordChar(_ c: unichar) -> Bool {
+            if let scalar = Unicode.Scalar(c) {
+                return CharacterSet.alphanumerics.contains(scalar) || c == 95
+            }
+            return false
+        }
+
+        // Check if cursor is on a word character
+        let currentChar = nsString.character(at: cursor)
+        guard isWordChar(currentChar) else {
+            NSSound.beep()
+            return
+        }
+
+        // Find start of word
+        var wordStart = cursor
+        while wordStart > 0 && isWordChar(nsString.character(at: wordStart - 1)) {
+            wordStart -= 1
+        }
+
+        // Find end of word
+        var wordEnd = cursor
+        while wordEnd < length - 1 && isWordChar(nsString.character(at: wordEnd + 1)) {
+            wordEnd += 1
+        }
+
+        let word = nsString.substring(with: NSRange(location: wordStart, length: wordEnd - wordStart + 1))
+        searchPattern = word
+        searchForward = forward
+
+        // Perform initial search
+        findNextSearchResult(forward: forward)
+    }
+
+    /// Enter search mode (/ and ? commands)
+    private func enterSearchMode(forward: Bool) {
+        searchForward = forward
+        editorMode = .command
+        commandBuffer = forward ? "/" : "?"
+        updateStatusBar()
+    }
+
+    /// Find next search result (n/N commands)
+    private func findNextSearchResult(forward: Bool) {
+        guard let storage = delegate?.vimTextStorage, !searchPattern.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        let nsString = storage.string as NSString
+        let length = nsString.length
+        let cursor = delegate?.vimSelectedRange.location ?? 0
+
+        // Determine actual search direction based on original direction and n/N
+        let actualForward = searchForward == forward
+
+        if actualForward {
+            // Search forward from cursor+1
+            let searchStart = min(cursor + 1, length)
+            var searchRange = NSRange(location: searchStart, length: length - searchStart)
+
+            var foundRange = nsString.range(of: searchPattern, options: [], range: searchRange)
+
+            // If not found, wrap around to beginning
+            if foundRange.location == NSNotFound {
+                searchRange = NSRange(location: 0, length: searchStart)
+                foundRange = nsString.range(of: searchPattern, options: [], range: searchRange)
+            }
+
+            if foundRange.location != NSNotFound {
+                delegate?.vimSetSelectedRange(NSRange(location: foundRange.location, length: 0))
+                return
+            }
+        } else {
+            // Search backward from cursor-1
+            let searchEnd = cursor
+            var searchRange = NSRange(location: 0, length: searchEnd)
+
+            var foundRange = nsString.range(of: searchPattern, options: .backwards, range: searchRange)
+
+            // If not found, wrap around to end
+            if foundRange.location == NSNotFound {
+                searchRange = NSRange(location: searchEnd, length: length - searchEnd)
+                foundRange = nsString.range(of: searchPattern, options: .backwards, range: searchRange)
+            }
+
+            if foundRange.location != NSNotFound {
+                delegate?.vimSetSelectedRange(NSRange(location: foundRange.location, length: 0))
+                return
+            }
+        }
+
+        // Pattern not found
+        NSSound.beep()
+    }
+
+    // MARK: - Join Lines (J command)
+
+    /// Join current line with next line
+    private func joinLines() {
+        guard let storage = delegate?.vimTextStorage else { return }
+        let nsString = storage.string as NSString
+        let length = nsString.length
+        let cursor = delegate?.vimSelectedRange.location ?? 0
+        guard cursor < length else { return }
+
+        // Get current line range
+        let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
+        let lineEnd = lineRange.location + lineRange.length
+
+        // Check if there's a next line
+        guard lineEnd < length else {
+            NSSound.beep()
+            return
+        }
+
+        // Find the end of current line content (before newline)
+        var contentEnd = lineEnd - 1
+        while contentEnd > lineRange.location {
+            let ch = nsString.character(at: contentEnd)
+            if ch != 0x0A && ch != 0x0D {
+                break
+            }
+            contentEnd -= 1
+        }
+        contentEnd += 1  // Move back to the newline character
+
+        // Get next line range
+        let nextLineRange = nsString.lineRange(for: NSRange(location: lineEnd, length: 0))
+
+        // Find first non-whitespace in next line
+        var nextLineStart = nextLineRange.location
+        while nextLineStart < nextLineRange.location + nextLineRange.length {
+            let ch = nsString.character(at: nextLineStart)
+            if ch != 0x20 && ch != 0x09 {
+                break
+            }
+            nextLineStart += 1
+        }
+
+        // Calculate the range to delete: from end of current line content to first non-space of next line
+        let deleteRange = NSRange(location: contentEnd, length: nextLineStart - contentEnd)
+
+        // Replace with a single space
+        if delegate?.vimShouldChangeText(in: deleteRange, replacementString: " ") == true {
+            delegate?.vimReplaceCharacters(in: deleteRange, with: " ")
+            delegate?.vimDidChangeText()
+            delegate?.vimSetSelectedRange(NSRange(location: contentEnd, length: 0))
+        }
     }
 
     // MARK: - Insert Lines

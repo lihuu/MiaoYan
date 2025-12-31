@@ -761,10 +761,10 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             handleSearchInput(editorLastSearchText, jumpToFirstMatch: false)
         }
 
-        // Update preview in split mode with debounce (300ms)
+        // Update preview in split mode with debounce (150ms for faster response)
         if UserDefaultsManagement.splitViewMode, EditTextView.note != nil {
             splitViewUpdateTimer?.invalidate()
-            splitViewUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            splitViewUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self = self else { return }
                     if let note = EditTextView.note {

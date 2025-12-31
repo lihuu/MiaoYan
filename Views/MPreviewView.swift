@@ -299,6 +299,16 @@ class MPreviewView: WKWebView, WKUIDelegate {
     private func buildUpdateScript(html: String, initializeMath: Bool, initializeDiagrams: Bool) -> String {
         var initScripts: [String] = []
 
+        // Always re-initialize code syntax highlighting
+        initScripts.append(
+            """
+                if (window.hljs) {
+                    document.querySelectorAll('pre code').forEach((block) => {
+                        hljs.highlightElement(block);
+                    });
+                }
+            """)
+
         if initializeMath {
             initScripts.append(
                 """

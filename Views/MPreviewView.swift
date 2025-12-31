@@ -444,7 +444,7 @@ class MPreviewView: WKWebView, WKUIDelegate {
             if let error = error {
                 // Only log errors in debug builds to avoid log spam
                 #if DEBUG
-                print("[ScrollSync] JavaScript execution error: \(error.localizedDescription)")
+                    print("[ScrollSync] JavaScript execution error: \(error.localizedDescription)")
                 #endif
             }
         }

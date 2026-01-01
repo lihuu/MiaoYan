@@ -72,9 +72,9 @@
 		27D95122285B5E4400F40306 /* Toast.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27D95121285B5E4400F40306 /* Toast.swift */; };
 		27D9A4F72873D345006317AD /* FileManager+.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27D9A4F62873D345006317AD /* FileManager+.swift */; };
 		27E951092E814E61004E2883 /* ShortcutTemplateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27E951082E814E61004E2883 /* ShortcutTemplateManager.swift */; };
-		27F8A0012EB0000000000001 /* VimModeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27F8A0002EB0000000000001 /* VimModeHandler.swift */; };
 		27EAA59A2EA8C76500D13871 /* app.icon in Resources */ = {isa = PBXBuildFile; fileRef = 27EAA5992EA8C76500D13871 /* app.icon */; };
 		27EFD78A2E40E2E400DE6636 /* HtmlManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27EFD7892E40E2E400DE6636 /* HtmlManager.swift */; };
+		27F8A0012EB0000000000001 /* VimModeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27F8A0002EB0000000000001 /* VimModeHandler.swift */; };
 		3680D573468EA822F427197E /* NSTextField+.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3680D20013301CC48E2BEC53 /* NSTextField+.swift */; };
 		3680DE38C941303E615282C4 /* MPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3680DA19202046722D9BEEA2 /* MPreviewView.swift */; };
 		8F7136EE23490CBF004DFA6E /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7136ED23490CBF004DFA6E /* Markdown.swift */; };
@@ -213,9 +213,9 @@
 		27D95121285B5E4400F40306 /* Toast.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Toast.swift; sourceTree = "<group>"; };
 		27D9A4F62873D345006317AD /* FileManager+.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FileManager+.swift"; sourceTree = "<group>"; };
 		27E951082E814E61004E2883 /* ShortcutTemplateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutTemplateManager.swift; sourceTree = "<group>"; };
-		27F8A0002EB0000000000001 /* VimModeHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VimModeHandler.swift; sourceTree = "<group>"; };
 		27EAA5992EA8C76500D13871 /* app.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = app.icon; sourceTree = "<group>"; };
 		27EFD7892E40E2E400DE6636 /* HtmlManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HtmlManager.swift; sourceTree = "<group>"; };
+		27F8A0002EB0000000000001 /* VimModeHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VimModeHandler.swift; sourceTree = "<group>"; };
 		3680D20013301CC48E2BEC53 /* NSTextField+.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = "NSTextField+.swift"; sourceTree = "<group>"; };
 		3680D9AA33A891E0F14496C6 /* NSColor+.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = "NSColor+.swift"; sourceTree = "<group>"; };
 		3680DA19202046722D9BEEA2 /* MPreviewView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MPreviewView.swift; sourceTree = "<group>"; };
@@ -933,7 +933,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2.3.1;
+				CURRENT_PROJECT_VERSION = 2.3.2;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = G6U5X85VQ3;
 				EMBED_ASSET_PACKS_IN_PRODUCT_BUNDLE = YES;
@@ -955,7 +955,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 11.5;
-				MARKETING_VERSION = 2.3.1;
+				MARKETING_VERSION = 2.3.2;
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -983,7 +983,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2.3.1;
+				CURRENT_PROJECT_VERSION = 2.3.2;
 				DEAD_CODE_STRIPPING = YES;
 				DEPLOYMENT_LOCATION = NO;
 				DEVELOPMENT_TEAM = G6U5X85VQ3;
@@ -1006,7 +1006,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 11.5;
-				MARKETING_VERSION = 2.3.1;
+				MARKETING_VERSION = 2.3.2;
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_LDFLAGS = (
 					"$(inherited)",

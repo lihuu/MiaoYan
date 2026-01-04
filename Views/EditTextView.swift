@@ -163,6 +163,42 @@ class EditTextView: NSTextView, @preconcurrency NSTextFinderClient {
             NSSound.beep()
             return
         }
+        
+        // Auto-complete brackets and quotes
+        if let string = insertString as? String, string.count == 1 {
+            let char = string.first!
+            let completionPair: String? = {
+                switch char {
+                // Brackets
+                case "(": return ")"
+                case "{": return "}"
+                case "[": return "]"
+                case "<": return ">"
+                // English quotes
+                case "\"": return "\""
+                case "'": return "'"
+                // Chinese quotes
+                case """: return """
+                // Chinese angle brackets (书名号)
+                case "《": return "》"
+                default: return nil
+                }
+            }()
+            
+            if let closingChar = completionPair {
+                // Insert both opening and closing characters
+                let pairedText = string + closingChar
+                super.insertText(pairedText)
+                
+                // Move cursor back one position to be between the pair
+                let currentRange = selectedRange()
+                if currentRange.location > 0 {
+                    setSelectedRange(NSRange(location: currentRange.location - 1, length: 0))
+                }
+                return
+            }
+        }
+        
         super.insertText(insertString)
     }
 

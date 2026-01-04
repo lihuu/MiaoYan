@@ -818,6 +818,7 @@ class VimModeHandler {
         let lineRange = nsString.lineRange(for: NSRange(location: cursor, length: 0))
         let text = nsString.substring(with: lineRange)
         copyToPasteboard(text)
+        flashYankedRange(lineRange)
     }
 
     private func handlePendingOperator(withMotion motion: String) {
@@ -986,12 +987,32 @@ class VimModeHandler {
         let nsString = storage.string as NSString
         let text = nsString.substring(with: range)
         copyToPasteboard(text)
+        flashYankedRange(range)
     }
 
     private func copyToPasteboard(_ text: String) {
         let pb = NSPasteboard.general
         pb.declareTypes([.string], owner: nil)
         pb.setString(text, forType: .string)
+    }
+
+    private func flashYankedRange(_ range: NSRange) {
+        guard
+            let storage = delegate?.vimTextStorage,
+            range.length > 0,
+            range.location >= 0,
+            range.location + range.length <= storage.length,
+            let layoutManager = storage.layoutManagers.first
+        else {
+            return
+        }
+
+        let highlightColor = Theme.selectionBackgroundColor.withAlphaComponent(0.35)
+        layoutManager.addTemporaryAttribute(.backgroundColor, value: highlightColor, forCharacterRange: range)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak layoutManager] in
+            layoutManager?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: range)
+        }
     }
 
     // MARK: - Line Movement
@@ -1522,6 +1543,7 @@ class VimModeHandler {
         let nsString = storage.string as NSString
         let text = nsString.substring(with: range)
         copyToPasteboard(text)
+        flashYankedRange(range)
         enterNormalMode()
         delegate?.vimSetSelectedRange(NSRange(location: range.location, length: 0))
     }
@@ -1572,6 +1594,7 @@ class VimModeHandler {
         let nsString = storage.string as NSString
         let text = nsString.substring(with: range)
         copyToPasteboard(text)
+        flashYankedRange(range)
         enterNormalMode()
         let lineStart = nsString.lineRange(for: NSRange(location: range.location, length: 0)).location
         delegate?.vimSetSelectedRange(NSRange(location: lineStart, length: 0))
